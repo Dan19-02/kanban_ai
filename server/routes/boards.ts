@@ -226,6 +226,8 @@ boardsRouter.post(
           transcript,
           summary: analysis.summary,
           keyDecisions: analysis.keyDecisions,
+          risks: analysis.risks,
+          dependencies: analysis.dependencies,
           sentimentScore: analysis.sentimentInfo.score,
           sentimentBreakdown: analysis.sentimentInfo.breakdown,
           actionItems: {

@@ -99,6 +99,8 @@ export function serializeBoardState(board: BoardWithState) {
   return {
     summary: board.summary ?? "",
     keyDecisions: board.keyDecisions,
+    risks: board.risks ?? [],
+    dependencies: board.dependencies ?? [],
     sentimentInfo:
       board.sentimentScore != null
         ? { score: board.sentimentScore, breakdown: board.sentimentBreakdown ?? "" }

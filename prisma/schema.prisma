@@ -64,6 +64,8 @@ model Board {
   transcript         String? @db.Text
   summary            String? @db.Text
   keyDecisions       String[]
+  risks              String[]
+  dependencies       String[]
   sentimentScore     String?
   sentimentBreakdown String? @db.Text
 

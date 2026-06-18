@@ -13,6 +13,10 @@ export interface TranscriptAnalysis {
   keyDecisions: string[];
   sentimentInfo: { score: string; breakdown: string };
   actionItems: AnalyzedActionItem[];
+  /** Risks, concerns, and blockers raised in the meeting. */
+  risks: string[];
+  /** Blocking dependencies / required sequencing between work items. */
+  dependencies: string[];
 }
 
 const NVIDIA_API_URL = "https://integrate.api.nvidia.com/v1/chat/completions";
@@ -27,11 +31,11 @@ function getApiKey(): string {
   return env.NVIDIA_API_KEY;
 }
 
-const SYSTEM_PROMPT = `You are a meeting analyst. Analyze the provided transcript and return a JSON object with exactly this structure (no markdown fences, no extra text — only raw JSON):
+const SYSTEM_PROMPT = `You are an expert meeting analyst for an enterprise meeting-intelligence platform. Analyze the transcript and return ONLY a raw JSON object (no markdown, no code fences, no commentary) with EXACTLY this structure:
 
 {
   "summary": "A concise summary of the meeting's content and context.",
-  "keyDecisions": ["Decision 1", "Decision 2"],
+  "keyDecisions": ["A concrete decision the group made"],
   "sentimentInfo": {
     "score": "Positive | Neutral | Negative",
     "breakdown": "Brief explanation of sentiment trends."
@@ -39,17 +43,32 @@ const SYSTEM_PROMPT = `You are a meeting analyst. Analyze the provided transcrip
   "actionItems": [
     {
       "title": "Short actionable title",
-      "assignee": "Person name or 'Unassigned'",
-      "description": "Detailed description of what needs to be done.",
+      "assignee": "Exact person responsible, or 'Unassigned'",
+      "description": "What needs to be done, including any deadline mentioned.",
       "priority": "High | Medium | Low"
     }
-  ]
+  ],
+  "risks": ["A risk, concern, or blocker raised"],
+  "dependencies": ["A blocking dependency or required sequence, e.g. 'X cannot start until Y is done'"]
 }
 
-Rules:
-- Set assignee to "Unassigned" if the responsible person is unknown.
-- keyDecisions must be clearly distinguishable from general discussion.
+EXTRACTION RULES — enterprise users need completeness and correct ownership:
+
+ACTION ITEMS — extract EVERY commitment, assignment, and follow-up:
+- Include implicit tasks ("I'll check", "I'll follow up internally"), escalations ("escalate to me if not resolved by Friday"), and notifications ("I'll inform Kevin").
+- ASSIGNEE must be the EXACT person who owns the task. If someone says "I'll do X", the assignee is that speaker. If a person is named ("Kevin should lead it", "Emily publishes by Friday"), use that name. Do not guess a plausible owner — attribute to who actually committed.
+- Ownership transfers: when work moves from person A to person B, the task's assignee is B; ALSO emit a separate notification task for whoever agreed to inform B (e.g. "Notify Kevin of ownership change", assignee = the person who said they'd tell Kevin).
+- Use "Unassigned" only when the owner is genuinely unstated.
+
+KEY DECISIONS — concrete decisions the group settled on, distinct from open discussion (e.g. "Reporting work is paused", "Performance prioritized over executive dashboards").
+
+RISKS — concerns, blockers, and threats raised (security gaps, performance problems, schedule slips, disputes, capacity limits). Capture each distinct risk.
+
+DEPENDENCIES — blocking relationships and required ordering. When there is a chain (A is blocked by B is blocked by C), express each link as its own clear statement.
+
+GENERAL:
 - priority must be exactly one of: "High", "Medium", "Low".
+- Every array must be present (use [] if nothing applies).
 - Return ONLY the JSON object. No markdown, no code fences, no explanation.`;
 
 /** Send a transcript to MiniMax M3 (via NVIDIA) and return the structured meeting analysis. */
@@ -126,5 +145,7 @@ export async function analyzeTranscript(
   // Defensive defaults in case the model omits arrays.
   parsed.keyDecisions ??= [];
   parsed.actionItems ??= [];
+  parsed.risks ??= [];
+  parsed.dependencies ??= [];
   return parsed;
 }
