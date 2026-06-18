@@ -5,7 +5,7 @@ import http from "http";
 import helmet from "helmet";
 import cookieParser from "cookie-parser";
 
-import { env, isProduction } from "./env";
+import { env, isProduction } from "./env.js";
 import { ApiError } from "./lib/http";
 import { apiLimiter } from "./middleware/rateLimit";
 import { authRouter } from "./routes/auth";
