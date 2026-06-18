@@ -1,0 +1,137 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+enum Plan {
+  FREE
+  STARTER
+  PRO
+  UNLIMITED
+}
+
+// ---------------------------------------------------------------------------
+// User
+// ---------------------------------------------------------------------------
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  name         String
+  passwordHash String
+
+  // Billing / subscription
+  plan                      Plan      @default(FREE)
+  freeTranscriptionsUsed    Int       @default(0)
+  periodTranscriptionsUsed  Int       @default(0)
+  stripeCustomerId          String?   @unique
+  stripeSubscriptionId      String?
+  subscriptionStatus        String?
+  currentPeriodEnd          DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  boards      Board[]        @relation("BoardOwner")
+  memberships BoardMember[]
+  comments    Comment[]
+}
+
+// ---------------------------------------------------------------------------
+// Board
+// ---------------------------------------------------------------------------
+
+model Board {
+  id      String @id @default(cuid())
+  name    String
+  ownerId String
+
+  // AI analysis results
+  transcript          String?
+  summary             String?
+  keyDecisions        String[]
+  sentimentScore      String?
+  sentimentBreakdown  String?
+
+  // Sharing
+  shareToken String?  @unique
+  shareRole  String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  owner       User          @relation("BoardOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  members     BoardMember[]
+  actionItems ActionItem[]
+  comments    Comment[]
+}
+
+// ---------------------------------------------------------------------------
+// Board membership (collaborators)
+// ---------------------------------------------------------------------------
+
+model BoardMember {
+  id          String  @id @default(cuid())
+  boardId     String
+  userId      String
+  role        String  @default("EDITOR") // "EDITOR" | "VIEWER"
+  displayName String?
+
+  createdAt DateTime @default(now())
+
+  board Board @relation(fields: [boardId], references: [id], onDelete: Cascade)
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([boardId, userId])
+}
+
+// ---------------------------------------------------------------------------
+// Action items (kanban cards)
+// ---------------------------------------------------------------------------
+
+model ActionItem {
+  id          String  @id @default(cuid())
+  boardId     String
+  title       String
+  assignee    String  @default("Unassigned")
+  description String?
+  status      String  @default("pending") // "pending" | "completed"
+  priority    String? // "High" | "Medium" | "Low"
+  dueDate     String?
+  position    Int     @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  board Board @relation(fields: [boardId], references: [id], onDelete: Cascade)
+}
+
+// ---------------------------------------------------------------------------
+// Comments
+// ---------------------------------------------------------------------------
+
+model Comment {
+  id         String @id @default(cuid())
+  boardId    String
+  authorId   String
+  authorName String
+  text       String
+
+  createdAt DateTime @default(now())
+
+  board  Board @relation(fields: [boardId], references: [id], onDelete: Cascade)
+  author User  @relation(fields: [authorId], references: [id], onDelete: Cascade)
+}
