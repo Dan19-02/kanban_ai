@@ -46,7 +46,10 @@ function emitPresence(boardId: string) {
   io?.to(roomName(boardId)).emit("presence", presenceList(boardId));
 }
 
-export function initRealtime(httpServer: http.Server, corsOrigin: string | boolean) {
+export function initRealtime(
+  httpServer: http.Server,
+  corsOrigin: string | string[] | boolean,
+) {
   io = new SocketIOServer(httpServer, {
     cors: { origin: corsOrigin, credentials: true },
   });

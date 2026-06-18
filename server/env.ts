@@ -28,9 +28,16 @@ const schema = z.object({
   // without it.
   NVIDIA_API_KEY: z.string().optional(),
 
-  // Public URL of the deployed app. Used for CORS allow-listing and building
-  // share links. Optional in development (defaults to same-origin).
+  // Public URL of the frontend. Used for CORS allow-listing, building share
+  // links, and Stripe redirect URLs. Required in production for the two-service
+  // (separate frontend + backend) deployment; optional in development.
   APP_URL: z.string().url().optional(),
+
+  // Optional cookie Domain attribute. Set to a shared parent domain
+  // (e.g. ".yourdomain.com") when the frontend and backend run on sibling
+  // subdomains so the auth cookie is first-party. Leave unset for a host-only
+  // cookie (the default).
+  COOKIE_DOMAIN: z.string().optional(),
 
   // --- Stripe billing (all optional; billing endpoints return a clear error
   // when the secret key is absent, so the app runs fully without payments) ---

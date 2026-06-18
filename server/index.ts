@@ -1,12 +1,15 @@
 import "dotenv/config"; // Load .env before anything reads process.env.
 import express, { type NextFunction, type Request, type Response } from "express";
 import path from "path";
+import fs from "fs";
 import http from "http";
 import helmet from "helmet";
 import cookieParser from "cookie-parser";
+import cors from "cors";
 
 import { env, isProduction } from "./env";
 import { ApiError } from "./lib/http";
+import { corsOptions, csrfOriginGuard, socketCorsOrigin } from "./lib/cors";
 import { apiLimiter } from "./middleware/rateLimit";
 import { authRouter } from "./routes/auth";
 import { boardsRouter } from "./routes/boards";
@@ -18,9 +21,18 @@ async function startServer() {
   const app = express();
   const httpServer = http.createServer(app);
 
-  // Behind a reverse proxy (Cloud Run, Nginx, etc.) trust X-Forwarded-* so
+  // Behind a reverse proxy (Render, Nginx, etc.) trust X-Forwarded-* so
   // secure cookies, client IPs (rate limiting) and protocol detection work.
   if (isProduction) app.set("trust proxy", 1);
+
+  if (isProduction && !env.APP_URL) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      "⚠️  APP_URL is not set. The frontend will be blocked by CORS and " +
+        "share/redirect links will fall back to request headers. " +
+        "Set APP_URL to your frontend origin.",
+    );
+  }
 
   app.use(
     helmet({
@@ -73,6 +85,15 @@ async function startServer() {
     },
   );
 
+  // Cross-origin access for the separately-deployed frontend. Strict, credentialed
+  // allow-list (see lib/cors). Registered after the webhook (server-to-server) and
+  // before the body parser so preflight requests are answered cheaply.
+  app.use("/api", cors(corsOptions));
+
+  // CSRF defense-in-depth: validate Origin on state-changing requests. Runs
+  // after the webhook (registered above, server-to-server) so Stripe is exempt.
+  app.use("/api", csrfOriginGuard);
+
   app.use(express.json({ limit: "1mb" }));
 
   // --- API ---
@@ -89,18 +110,19 @@ async function startServer() {
   });
 
   // --- Realtime ---
-  initRealtime(httpServer, env.APP_URL ?? true);
+  initRealtime(httpServer, socketCorsOrigin);
 
-  // --- Frontend (static files in production, API-only in development) ---
-  if (isProduction) {
-    const distPath = path.join(process.cwd(), "dist/public");
+  // --- Frontend ---
+  // Serve an embedded frontend build if one is present (single-service /
+  // monolith deployments). In the two-service setup the frontend is a separate
+  // static site, so this is skipped and the backend runs API-only.
+  const distPath = path.join(process.cwd(), "dist/public");
+  const indexHtml = path.join(distPath, "index.html");
+  if (fs.existsSync(indexHtml)) {
     app.use(express.static(distPath));
-    app.get("*", (_req, res) => {
-      res.sendFile(path.join(distPath, "index.html"));
-    });
+    app.get("*", (_req, res) => res.sendFile(indexHtml));
   } else {
-    // eslint-disable-next-line no-console
-    console.log("Running in API-only mode (no frontend served)");
+    app.get("/", (_req, res) => res.json({ service: "kanban-ai-backend", status: "ok" }));
   }
 
   // --- Central error handler (must be last, 4-arg signature) ---

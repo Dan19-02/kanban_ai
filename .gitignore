@@ -1,4 +1,10 @@
 node_modules
 dist
+.DS_Store
+
+# Environment files (keep the example committed)
 .env
+.env.*
+!.env.example
+
 *.log

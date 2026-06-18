@@ -1,5 +1,6 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
+// Prisma schema for Meeting to Kanban AI
+// Database: PostgreSQL
+// Run `npm run db:generate` after editing, and `npm run db:migrate` to apply changes.
 
 generator client {
   provider = "prisma-client-js"
@@ -10,10 +11,18 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-// ---------------------------------------------------------------------------
-// Enums
-// ---------------------------------------------------------------------------
+/// Role a member holds on a board. The board owner is tracked separately via
+/// Board.ownerId and implicitly has full control.
+enum Role {
+  EDITOR
+  VIEWER
+}
 
+/// Subscription tier. Determines the transcription (AI analysis) quota.
+///   FREE      → 3 transcriptions, lifetime
+///   STARTER   → 30 / month   ($10)
+///   PRO       → 100 / month  ($30)
+///   UNLIMITED → unlimited    ($99)
 enum Plan {
   FREE
   STARTER
@@ -21,117 +30,101 @@ enum Plan {
   UNLIMITED
 }
 
-// ---------------------------------------------------------------------------
-// User
-// ---------------------------------------------------------------------------
-
 model User {
   id           String   @id @default(cuid())
   email        String   @unique
   name         String
   passwordHash String
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
 
-  // Billing / subscription
-  plan                      Plan      @default(FREE)
-  freeTranscriptionsUsed    Int       @default(0)
-  periodTranscriptionsUsed  Int       @default(0)
-  stripeCustomerId          String?   @unique
-  stripeSubscriptionId      String?
-  subscriptionStatus        String?
-  currentPeriodEnd          DateTime?
+  // --- Billing & usage ---
+  plan Plan @default(FREE)
+  // Lifetime count of transcriptions used on the FREE plan (capped at 3).
+  freeTranscriptionsUsed Int @default(0)
+  // Transcriptions used in the current paid billing period (reset on renewal).
+  periodTranscriptionsUsed Int @default(0)
+  stripeCustomerId     String?   @unique
+  stripeSubscriptionId String?   @unique
+  subscriptionStatus   String?
+  currentPeriodEnd     DateTime?
 
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  // Relations
-  boards      Board[]        @relation("BoardOwner")
+  ownedBoards Board[]       @relation("BoardOwner")
   memberships BoardMember[]
   comments    Comment[]
 }
 
-// ---------------------------------------------------------------------------
-// Board
-// ---------------------------------------------------------------------------
-
 model Board {
-  id      String @id @default(cuid())
-  name    String
-  ownerId String
+  id        String   @id @default(cuid())
+  name      String
+  ownerId   String
+  owner     User     @relation("BoardOwner", fields: [ownerId], references: [id], onDelete: Cascade)
 
-  // AI analysis results
-  transcript          String?
-  summary             String?
-  keyDecisions        String[]
-  sentimentScore      String?
-  sentimentBreakdown  String?
+  // --- AI analysis output (populated after a transcript is analyzed) ---
+  transcript         String? @db.Text
+  summary            String? @db.Text
+  keyDecisions       String[]
+  sentimentScore     String?
+  sentimentBreakdown String? @db.Text
 
-  // Sharing
-  shareToken String?  @unique
-  shareRole  String?
+  // --- Shareable link ---
+  // When shareToken is null, link sharing is disabled. shareRole is the role
+  // granted to a logged-in user who opens the link.
+  shareToken String? @unique
+  shareRole  Role?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  // Relations
-  owner       User          @relation("BoardOwner", fields: [ownerId], references: [id], onDelete: Cascade)
   members     BoardMember[]
   actionItems ActionItem[]
   comments    Comment[]
-}
 
-// ---------------------------------------------------------------------------
-// Board membership (collaborators)
-// ---------------------------------------------------------------------------
+  @@index([ownerId])
+}
 
 model BoardMember {
-  id          String  @id @default(cuid())
-  boardId     String
-  userId      String
-  role        String  @default("EDITOR") // "EDITOR" | "VIEWER"
+  id      String @id @default(cuid())
+  boardId String
+  board   Board  @relation(fields: [boardId], references: [id], onDelete: Cascade)
+  userId  String
+  user    User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role    Role   @default(EDITOR)
+  // The name this member chose to display on this board. Set when they join;
+  // falls back to the account name until then.
   displayName String?
-
-  createdAt DateTime @default(now())
-
-  board Board @relation(fields: [boardId], references: [id], onDelete: Cascade)
-  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt   DateTime @default(now())
 
   @@unique([boardId, userId])
+  @@index([userId])
 }
-
-// ---------------------------------------------------------------------------
-// Action items (kanban cards)
-// ---------------------------------------------------------------------------
 
 model ActionItem {
-  id          String  @id @default(cuid())
+  id          String   @id @default(cuid())
   boardId     String
+  board       Board    @relation(fields: [boardId], references: [id], onDelete: Cascade)
   title       String
-  assignee    String  @default("Unassigned")
-  description String?
-  status      String  @default("pending") // "pending" | "completed"
+  assignee    String   @default("Unassigned")
+  description String?  @db.Text
+  status      String   @default("pending") // "pending" | "completed"
   priority    String? // "High" | "Medium" | "Low"
-  dueDate     String?
-  position    Int     @default(0)
+  dueDate     String? // ISO date string (yyyy-mm-dd), kept as text to match UI
+  position    Int      @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
 
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  board Board @relation(fields: [boardId], references: [id], onDelete: Cascade)
+  @@index([boardId])
 }
 
-// ---------------------------------------------------------------------------
-// Comments
-// ---------------------------------------------------------------------------
-
 model Comment {
-  id         String @id @default(cuid())
+  id         String   @id @default(cuid())
   boardId    String
-  authorId   String
-  authorName String
-  text       String
+  board      Board    @relation(fields: [boardId], references: [id], onDelete: Cascade)
+  authorId   String?
+  author     User?    @relation(fields: [authorId], references: [id], onDelete: SetNull)
+  authorName String // denormalized so comments survive author deletion
+  text       String   @db.Text
+  createdAt  DateTime @default(now())
 
-  createdAt DateTime @default(now())
-
-  board  Board @relation(fields: [boardId], references: [id], onDelete: Cascade)
-  author User  @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  @@index([boardId])
 }

@@ -1,15 +1,57 @@
+# Render Blueprint — Backend (Web Service + managed Postgres)
+#
+# Deploy: Render Dashboard → New → Blueprint → select THIS (backend) repo.
+# Provides the API + Socket.IO and a managed PostgreSQL database.
+
+databases:
+  # Render-managed Postgres. The free plan is deleted after 30 days — switch to
+  # a paid plan for production, or delete this block and set DATABASE_URL to an
+  # external database (e.g. Aiven/Neon/Supabase) under the service's envVars.
+  - name: kanban-ai-db
+    databaseName: kanban
+    user: kanban
+    plan: free
+
 services:
   - type: web
     name: kanban-ai-backend
-    env: node
-    buildCommand: npm install && npx prisma generate && npx prisma migrate deploy && npm run build
+    runtime: node
+    plan: free
+    # Install, apply DB migrations, then compile. DATABASE_URL is available at
+    # build time, so `migrate deploy` (idempotent) runs every deploy.
+    buildCommand: npm ci && npm run db:deploy && npm run build
     startCommand: npm start
+    healthCheckPath: /api/health
     envVars:
       - key: NODE_ENV
         value: production
-      - key: PORT
-        value: 3000
+      # PORT is injected by Render — do not set it here.
       - key: DATABASE_URL
-        sync: false
+        fromDatabase:
+          name: kanban-ai-db
+          property: connectionString
+      # Strong signing secret generated and stored by Render.
       - key: JWT_SECRET
+        generateValue: true
+      # Frontend origin — set to your deployed Static Site URL. Required so CORS
+      # and cross-site auth cookies work. e.g. https://kanban-ai-frontend.onrender.com
+      - key: APP_URL
+        sync: false
+      # AI analysis (NVIDIA MiniMax M3). Optional; analyze returns a clear error
+      # if unset.
+      - key: NVIDIA_API_KEY
+        sync: false
+      # Optional: shared parent domain for first-party cookies (custom domains).
+      - key: COOKIE_DOMAIN
+        sync: false
+      # Billing (optional — leave unset to disable paid plans).
+      - key: STRIPE_SECRET_KEY
+        sync: false
+      - key: STRIPE_WEBHOOK_SECRET
+        sync: false
+      - key: STRIPE_PRICE_STARTER
+        sync: false
+      - key: STRIPE_PRICE_PRO
+        sync: false
+      - key: STRIPE_PRICE_UNLIMITED
         sync: false
