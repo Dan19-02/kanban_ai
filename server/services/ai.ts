@@ -6,6 +6,8 @@ export interface AnalyzedActionItem {
   assignee: string;
   description: string;
   priority: "High" | "Medium" | "Low";
+  /** Exact titles of other action items that must finish before this one. */
+  blockedBy: string[];
 }
 
 export interface TranscriptAnalysis {
@@ -45,7 +47,8 @@ const SYSTEM_PROMPT = `You are an expert meeting analyst for an enterprise meeti
       "title": "Short actionable title",
       "assignee": "Exact person responsible, or 'Unassigned'",
       "description": "What needs to be done, including any deadline mentioned.",
-      "priority": "High | Medium | Low"
+      "priority": "High | Medium | Low",
+      "blockedBy": ["Exact title of another action item that must finish first"]
     }
   ],
   "risks": ["A risk, concern, or blocker raised"],
@@ -65,6 +68,8 @@ KEY DECISIONS — concrete decisions the group settled on, distinct from open di
 RISKS — concerns, blockers, and threats raised (security gaps, performance problems, schedule slips, disputes, capacity limits). Capture each distinct risk.
 
 DEPENDENCIES — blocking relationships and required ordering. When there is a chain (A is blocked by B is blocked by C), express each link as its own clear statement.
+
+BLOCKED BY (per task) — for each action item, set "blockedBy" to the EXACT titles of OTHER action items in this same list that must finish before it can start. Use [] when nothing blocks it. Only reference titles that appear in actionItems, so the board can show blockers on each card.
 
 GENERAL:
 - priority must be exactly one of: "High", "Medium", "Low".

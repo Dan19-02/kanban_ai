@@ -79,6 +79,7 @@ export function serializeActionItem(item: BoardWithState["actionItems"][number])
     status: item.status as "pending" | "completed",
     priority: (item.priority ?? undefined) as "High" | "Medium" | "Low" | undefined,
     dueDate: item.dueDate ?? undefined,
+    blockedBy: item.blockedBy ?? [],
   };
 }
 

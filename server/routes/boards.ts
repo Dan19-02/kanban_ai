@@ -236,6 +236,7 @@ boardsRouter.post(
               assignee: item.assignee || "Unassigned",
               description: item.description,
               priority: item.priority,
+              blockedBy: item.blockedBy ?? [],
               status: "pending",
               position: index,
             })),
