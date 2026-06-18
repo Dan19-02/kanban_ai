@@ -228,6 +228,8 @@ boardsRouter.post(
           keyDecisions: analysis.keyDecisions,
           risks: analysis.risks,
           dependencies: analysis.dependencies,
+          blockers: analysis.blockers,
+          openQuestions: analysis.openQuestions,
           sentimentScore: analysis.sentimentInfo.score,
           sentimentBreakdown: analysis.sentimentInfo.breakdown,
           actionItems: {

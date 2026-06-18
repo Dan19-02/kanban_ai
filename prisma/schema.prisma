@@ -66,6 +66,8 @@ model Board {
   keyDecisions       String[]
   risks              String[]
   dependencies       String[]
+  blockers           String[]
+  openQuestions      String[]
   sentimentScore     String?
   sentimentBreakdown String? @db.Text
 

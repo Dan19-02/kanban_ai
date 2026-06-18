@@ -102,6 +102,8 @@ export function serializeBoardState(board: BoardWithState) {
     keyDecisions: board.keyDecisions,
     risks: board.risks ?? [],
     dependencies: board.dependencies ?? [],
+    blockers: board.blockers ?? [],
+    openQuestions: board.openQuestions ?? [],
     sentimentInfo:
       board.sentimentScore != null
         ? { score: board.sentimentScore, breakdown: board.sentimentBreakdown ?? "" }

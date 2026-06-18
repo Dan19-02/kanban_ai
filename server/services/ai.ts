@@ -19,6 +19,10 @@ export interface TranscriptAnalysis {
   risks: string[];
   /** Blocking dependencies / required sequencing between work items. */
   dependencies: string[];
+  /** Impediments currently stopping progress (the actionable "what's stuck"). */
+  blockers: string[];
+  /** Questions raised in the meeting that were left unanswered. */
+  openQuestions: string[];
 }
 
 const NVIDIA_API_URL = "https://integrate.api.nvidia.com/v1/chat/completions";
@@ -52,7 +56,9 @@ const SYSTEM_PROMPT = `You are an expert meeting analyst for an enterprise meeti
     }
   ],
   "risks": ["A risk, concern, or blocker raised"],
-  "dependencies": ["A blocking dependency or required sequence, e.g. 'X cannot start until Y is done'"]
+  "dependencies": ["A blocking dependency or required sequence, e.g. 'X cannot start until Y is done'"],
+  "blockers": ["An impediment currently stopping progress, e.g. 'Migration testing blocked by missing mapping file'"],
+  "openQuestions": ["A question raised but left unanswered, e.g. 'What are the final acquisition numbers?'"]
 }
 
 EXTRACTION RULES — enterprise users need completeness and correct ownership:
@@ -68,6 +74,10 @@ KEY DECISIONS — concrete decisions the group settled on, distinct from open di
 RISKS — concerns, blockers, and threats raised (security gaps, performance problems, schedule slips, disputes, capacity limits). Capture each distinct risk.
 
 DEPENDENCIES — blocking relationships and required ordering. When there is a chain (A is blocked by B is blocked by C), express each link as its own clear statement.
+
+BLOCKERS — the most pressing impediments CURRENTLY stopping progress. This is the actionable "what's stuck right now" view, distinct from dependencies (which describe sequencing): include missing inputs, unresolved disputes, postponed prerequisites, and process blockers. Phrase each as a short, specific red-flag statement. Use [] if nothing is actively blocked.
+
+OPEN QUESTIONS — important questions that were explicitly raised but left UNANSWERED or unresolved by the meeting's end. Phrase each as the question itself. Use [] if none.
 
 BLOCKED BY (per task) — for each action item, set "blockedBy" to the EXACT titles of OTHER action items in this same list that must finish before it can start. Use [] when nothing blocks it. Only reference titles that appear in actionItems, so the board can show blockers on each card.
 
@@ -152,5 +162,7 @@ export async function analyzeTranscript(
   parsed.actionItems ??= [];
   parsed.risks ??= [];
   parsed.dependencies ??= [];
+  parsed.blockers ??= [];
+  parsed.openQuestions ??= [];
   return parsed;
 }
