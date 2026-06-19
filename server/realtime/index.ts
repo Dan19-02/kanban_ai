@@ -54,9 +54,13 @@ export function initRealtime(
     cors: { origin: corsOrigin, credentials: true },
   });
 
-  // Authenticate every socket from the same httpOnly cookie used for REST.
+  // Authenticate every socket. Prefer the token passed in the handshake auth
+  // (cross-origin / mobile) and fall back to the httpOnly cookie (same-origin).
   io.use(async (socket, next) => {
-    const token = readCookie(socket.handshake.headers.cookie, AUTH_COOKIE);
+    const authToken = socket.handshake.auth?.token;
+    const token =
+      (typeof authToken === "string" && authToken) ||
+      readCookie(socket.handshake.headers.cookie, AUTH_COOKIE);
     const user = await authenticateToken(token);
     if (!user) return next(new Error("unauthorized"));
     socket.data.user = user;

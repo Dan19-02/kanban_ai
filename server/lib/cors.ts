@@ -51,6 +51,10 @@ const UNSAFE_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 export function csrfOriginGuard(req: Request, res: Response, next: NextFunction): void {
   if (!UNSAFE_METHODS.has(req.method)) return next();
 
+  // Bearer-token requests carry their credential in a header the browser never
+  // attaches automatically cross-site, so they can't be forged via CSRF.
+  if (req.headers.authorization?.startsWith("Bearer ")) return next();
+
   const origin = req.get("origin");
   if (!origin || allowedOrigins.includes(origin)) return next();
 

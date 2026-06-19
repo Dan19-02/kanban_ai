@@ -6,6 +6,7 @@ import http from "http";
 import helmet from "helmet";
 import cookieParser from "cookie-parser";
 import cors from "cors";
+import compression from "compression";
 
 import { env, isProduction } from "./env";
 import { ApiError } from "./lib/http";
@@ -52,6 +53,7 @@ async function startServer() {
         : false, // Vite's dev client needs inline scripts / eval.
     }),
   );
+  app.use(compression()); // gzip API/JSON responses to cut payload size + latency.
   app.use(cookieParser());
 
   // Stripe webhook must receive the RAW body for signature verification, so it

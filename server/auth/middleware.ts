@@ -37,24 +37,37 @@ export async function authenticateToken(
   return user;
 }
 
-/** Populates req.user when a valid cookie is present; never rejects. */
+/**
+ * Extract the auth token from the request. Prefers the `Authorization: Bearer`
+ * header (works cross-origin on every device, incl. mobile where third-party
+ * cookies are blocked) and falls back to the httpOnly cookie (same-origin).
+ */
+export function getRequestToken(req: Request): string | undefined {
+  const header = req.headers.authorization;
+  if (header && header.startsWith("Bearer ")) {
+    return header.slice(7).trim();
+  }
+  return req.cookies?.[AUTH_COOKIE];
+}
+
+/** Populates req.user when a valid token is present; never rejects. */
 export async function optionalAuth(
   req: Request,
   _res: Response,
   next: NextFunction,
 ): Promise<void> {
-  const user = await authenticateToken(req.cookies?.[AUTH_COOKIE]);
+  const user = await authenticateToken(getRequestToken(req));
   if (user) req.user = user;
   next();
 }
 
-/** Rejects with 401 unless a valid auth cookie is present. */
+/** Rejects with 401 unless a valid token (Bearer header or cookie) is present. */
 export async function requireAuth(
   req: Request,
   res: Response,
   next: NextFunction,
 ): Promise<void> {
-  const user = await authenticateToken(req.cookies?.[AUTH_COOKIE]);
+  const user = await authenticateToken(getRequestToken(req));
   if (!user) {
     res.status(401).json({ error: "Authentication required" });
     return;

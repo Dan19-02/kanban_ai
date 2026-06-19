@@ -37,7 +37,9 @@ authRouter.post(
 
     const token = signAuthToken({ sub: user.id, email: user.email });
     setAuthCookie(res, token);
-    res.status(201).json({ user: serializeUser(user) });
+    // Return the token in the body too, so the SPA can authenticate cross-origin
+    // via an Authorization header (mobile blocks third-party cookies).
+    res.status(201).json({ user: serializeUser(user), token });
   }),
 );
 
@@ -60,7 +62,7 @@ authRouter.post(
 
     const token = signAuthToken({ sub: user.id, email: user.email });
     setAuthCookie(res, token);
-    res.json({ user: serializeUser(user) });
+    res.json({ user: serializeUser(user), token });
   }),
 );
 
