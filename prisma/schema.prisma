@@ -49,9 +49,62 @@ model User {
   subscriptionStatus   String?
   currentPeriodEnd     DateTime?
 
-  ownedBoards Board[]       @relation("BoardOwner")
-  memberships BoardMember[]
-  comments    Comment[]
+  ownedBoards        Board[]         @relation("BoardOwner")
+  ownedProjects      Project[]       @relation("ProjectOwner")
+  memberships        BoardMember[]
+  projectMemberships ProjectMember[]
+  comments           Comment[]
+  notifications      Notification[]
+}
+
+/// An in-app notification for a user — created when they're @mentioned in a
+/// comment or assigned a task. `read` flips when they open the inbox.
+model Notification {
+  id           String   @id @default(cuid())
+  userId       String
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type         String // "mention" | "assignment"
+  // Where it points (board to open). actionItemId is informational (no FK, so
+  // deleting an item doesn't need to cascade here).
+  boardId      String?
+  board        Board?   @relation(fields: [boardId], references: [id], onDelete: Cascade)
+  actionItemId String?
+  actorName    String // who triggered it (display name)
+  text         String   @db.Text // preview snippet
+  read         Boolean  @default(false)
+  createdAt    DateTime @default(now())
+
+  @@index([userId, read])
+  @@index([userId, createdAt])
+}
+
+/// A workspace that groups related boards (e.g. one project = a client or
+/// initiative; each board inside = a meeting / call / day). Owner-scoped: the
+/// owner is the admin who tracks the work. Collaboration stays per-board via
+/// BoardMember, so a project never widens access on its own.
+model Project {
+  id          String  @id @default(cuid())
+  name        String
+  description String? @db.Text
+  /// Display colour token from a fixed allow-list (see validation.ts), not raw
+  /// CSS — the frontend maps it to a Tailwind class.
+  color       String  @default("indigo")
+  ownerId     String
+  owner       User    @relation("ProjectOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  archived    Boolean @default(false)
+
+  // --- Shareable link (mirrors Board). A logged-in user opening the link gets
+  // shareRole on the project and, by inheritance, on all its boards. ---
+  shareToken String? @unique
+  shareRole  Role?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  boards  Board[]
+  members ProjectMember[]
+
+  @@index([ownerId])
 }
 
 model Board {
@@ -59,6 +112,11 @@ model Board {
   name      String
   ownerId   String
   owner     User     @relation("BoardOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+
+  // Owning project (optional: legacy boards and link-shared boards may be
+  // unfiled). SetNull so deleting a project never destroys its boards.
+  projectId String?
+  project   Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
 
   // --- AI analysis output (populated after a transcript is analyzed) ---
   transcript         String? @db.Text
@@ -80,11 +138,13 @@ model Board {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  members     BoardMember[]
-  actionItems ActionItem[]
-  comments    Comment[]
+  members       BoardMember[]
+  actionItems   ActionItem[]
+  comments      Comment[]
+  notifications Notification[]
 
   @@index([ownerId])
+  @@index([projectId])
 }
 
 model BoardMember {
@@ -100,6 +160,21 @@ model BoardMember {
   createdAt   DateTime @default(now())
 
   @@unique([boardId, userId])
+  @@index([userId])
+}
+
+/// A user granted access to a whole project (and, by inheritance, every board in
+/// it). Mirrors BoardMember. The project owner is tracked via Project.ownerId.
+model ProjectMember {
+  id        String  @id @default(cuid())
+  projectId String
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role      Role    @default(EDITOR)
+  createdAt DateTime @default(now())
+
+  @@unique([projectId, userId])
   @@index([userId])
 }
 
@@ -119,6 +194,8 @@ model ActionItem {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
+  comments Comment[]
+
   @@index([boardId])
 }
 
@@ -126,6 +203,10 @@ model Comment {
   id         String   @id @default(cuid())
   boardId    String
   board      Board    @relation(fields: [boardId], references: [id], onDelete: Cascade)
+  // When set, this is a task-level comment (the board-level chat uses
+  // actionItemId = null). Cascade so a task's discussion is removed with it.
+  actionItemId String?
+  actionItem   ActionItem? @relation(fields: [actionItemId], references: [id], onDelete: Cascade)
   authorId   String?
   author     User?    @relation(fields: [authorId], references: [id], onDelete: SetNull)
   authorName String // denormalized so comments survive author deletion
@@ -133,4 +214,5 @@ model Comment {
   createdAt  DateTime @default(now())
 
   @@index([boardId])
+  @@index([actionItemId])
 }

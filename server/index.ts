@@ -14,6 +14,8 @@ import { corsOptions, csrfOriginGuard, socketCorsOrigin } from "./lib/cors";
 import { apiLimiter } from "./middleware/rateLimit";
 import { authRouter } from "./routes/auth";
 import { boardsRouter } from "./routes/boards";
+import { projectsRouter } from "./routes/projects";
+import { notificationsRouter } from "./routes/notifications";
 import { billingRouter } from "./routes/billing";
 import { constructWebhookEvent, handleWebhookEvent } from "./services/billing";
 import { initRealtime } from "./realtime";
@@ -103,7 +105,9 @@ async function startServer() {
 
   app.use("/api", apiLimiter);
   app.use("/api/auth", authRouter);
+  app.use("/api/projects", projectsRouter);
   app.use("/api/boards", boardsRouter);
+  app.use("/api/notifications", notificationsRouter);
   app.use("/api/billing", billingRouter);
 
   // Unknown API route -> JSON 404 (so the SPA fallback never swallows it).

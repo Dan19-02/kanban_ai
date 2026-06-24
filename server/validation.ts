@@ -16,10 +16,45 @@ export const loginSchema = z.object({
   password: z.string().min(1, "Password is required"),
 });
 
+// --- Projects ---
+
+// Fixed colour allow-list. We never store raw CSS — the frontend maps each
+// token to a Tailwind class, so an attacker can't inject styles via the value.
+export const PROJECT_COLORS = [
+  "indigo",
+  "emerald",
+  "amber",
+  "rose",
+  "sky",
+  "violet",
+  "teal",
+  "slate",
+] as const;
+
+const projectColor = z.enum(PROJECT_COLORS);
+
+export const createProjectSchema = z.object({
+  name: z.string().trim().min(1, "Project name is required").max(120),
+  description: z.string().trim().max(500, "Description is too long").optional(),
+  color: projectColor.default("indigo"),
+});
+
+export const updateProjectSchema = z
+  .object({
+    name: z.string().trim().min(1, "Project name is required").max(120),
+    description: z.string().trim().max(500, "Description is too long").nullable(),
+    color: projectColor,
+    archived: z.boolean(),
+  })
+  .partial()
+  .refine((v) => Object.keys(v).length > 0, "No fields to update");
+
 // --- Boards ---
 
 export const createBoardSchema = z.object({
   name: z.string().trim().min(1, "Board name is required").max(120),
+  // Optional owning project. Verified against ownership in the route handler.
+  projectId: z.string().trim().min(1).max(40).optional(),
 });
 
 export const updateBoardSchema = z.object({

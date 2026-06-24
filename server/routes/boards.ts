@@ -20,12 +20,15 @@ import { requireAuth } from "../auth/middleware";
 import {
   requireBoardAccess,
   serializeBoard,
+  serializeComment,
   resolveDisplayName,
   needsDisplayName,
   type BoardWithState,
 } from "../services/boardAccess";
 import { boardInclude } from "../services/boardInclude";
+import { requireProjectOwner } from "../services/projectAccess";
 import { analyzeTranscript } from "../services/ai";
+import { notifyMentions, notifyAssignment } from "../services/notifications";
 import { broadcastBoardState } from "../realtime";
 import { analyzeLimiter } from "../middleware/rateLimit";
 import { PLANS, transcriptionLimit, usedCount } from "../services/plans";
@@ -75,6 +78,7 @@ boardsRouter.get(
         id: b.id,
         name: b.name,
         role: "OWNER" as const,
+        projectId: b.projectId,
         hasAnalysis: b.summary != null,
         itemCount: b._count.actionItems,
         memberCount: b._count.members + 1, // +1 for the owner
@@ -84,6 +88,7 @@ boardsRouter.get(
         id: m.board.id,
         name: m.board.name,
         role: m.role as "EDITOR" | "VIEWER",
+        projectId: m.board.projectId,
         hasAnalysis: m.board.summary != null,
         itemCount: m.board._count.actionItems,
         memberCount: m.board._count.members + 1,
@@ -98,9 +103,12 @@ boardsRouter.get(
 boardsRouter.post(
   "/",
   asyncHandler(async (req, res) => {
-    const { name } = parse(createBoardSchema, req.body);
+    const { name, projectId } = parse(createBoardSchema, req.body);
+    // If filing the board under a project, confirm the caller owns it (404 on a
+    // foreign/unknown id, so project existence is never leaked).
+    if (projectId) await requireProjectOwner(req.user!.id, projectId);
     const board = await prisma.board.create({
-      data: { name, ownerId: req.user!.id },
+      data: { name, ownerId: req.user!.id, projectId: projectId ?? null },
       include: boardInclude,
     });
     res.status(201).json({ board: serializeBoard(board, "OWNER") });
@@ -389,7 +397,7 @@ boardsRouter.post(
       where: { boardId: req.params.id },
       _max: { position: true },
     });
-    await prisma.actionItem.create({
+    const created = await prisma.actionItem.create({
       data: {
         boardId: req.params.id,
         title: data.title,
@@ -400,6 +408,14 @@ boardsRouter.post(
         position: (max._max.position ?? -1) + 1,
       },
     });
+    await notifyAssignment({
+      boardId: req.params.id,
+      actionItemId: created.id,
+      assigneeName: data.assignee,
+      title: data.title,
+      actorId: req.user!.id,
+      actorName: req.user!.name,
+    }).catch(() => {});
     const board = await reload(req.params.id);
     await broadcastBoardState(board.id);
     res.status(201).json({ board: serializeBoard(board, "EDITOR") });
@@ -415,11 +431,22 @@ boardsRouter.patch(
     // Ensure the item belongs to this board before updating.
     const existing = await prisma.actionItem.findFirst({
       where: { id: req.params.itemId, boardId: req.params.id },
-      select: { id: true },
+      select: { id: true, assignee: true, title: true },
     });
     if (!existing) throw new ApiError(404, "Action item not found");
 
     await prisma.actionItem.update({ where: { id: req.params.itemId }, data });
+    // Notify the new assignee only when the assignment actually changed.
+    if (data.assignee && data.assignee !== existing.assignee) {
+      await notifyAssignment({
+        boardId: req.params.id,
+        actionItemId: req.params.itemId,
+        assigneeName: data.assignee,
+        title: data.title ?? existing.title,
+        actorId: req.user!.id,
+        actorName: req.user!.name,
+      }).catch(() => {});
+    }
     const board = await reload(req.params.id);
     await broadcastBoardState(board.id);
     res.json({ board: serializeBoard(board, "EDITOR") });
@@ -447,16 +474,71 @@ boardsRouter.post(
   asyncHandler(async (req, res) => {
     const access = await requireBoardAccess(req.user!.id, req.params.id, "EDITOR");
     const { text } = parse(createCommentSchema, req.body);
+    const actorName = resolveDisplayName(access, req.user!.name);
     await prisma.comment.create({
-      data: {
-        boardId: req.params.id,
-        authorId: req.user!.id,
-        authorName: resolveDisplayName(access, req.user!.name),
-        text,
-      },
+      data: { boardId: req.params.id, authorId: req.user!.id, authorName: actorName, text },
     });
+    // Best-effort: never let a notification failure break posting a comment.
+    await notifyMentions({ boardId: req.params.id, actorId: req.user!.id, actorName, text }).catch(
+      () => {},
+    );
     const board = await reload(req.params.id);
     await broadcastBoardState(board.id);
     res.status(201).json({ board: serializeBoard(board, "EDITOR") });
+  }),
+);
+
+// --- Task-level comments (per-action-item discussion / "Activity") -----------
+
+/** Confirm an action item belongs to this board, or 404. */
+async function requireItemOnBoard(boardId: string, itemId: string): Promise<void> {
+  const item = await prisma.actionItem.findFirst({
+    where: { id: itemId, boardId },
+    select: { id: true },
+  });
+  if (!item) throw new ApiError(404, "Action item not found");
+}
+
+boardsRouter.get(
+  "/:id/items/:itemId/comments",
+  asyncHandler(async (req, res) => {
+    await requireBoardAccess(req.user!.id, req.params.id); // VIEWER+
+    await requireItemOnBoard(req.params.id, req.params.itemId);
+    const comments = await prisma.comment.findMany({
+      where: { actionItemId: req.params.itemId },
+      orderBy: { createdAt: "asc" },
+    });
+    res.json({ comments: comments.map(serializeComment) });
+  }),
+);
+
+boardsRouter.post(
+  "/:id/items/:itemId/comments",
+  asyncHandler(async (req, res) => {
+    const access = await requireBoardAccess(req.user!.id, req.params.id, "EDITOR");
+    const { text } = parse(createCommentSchema, req.body);
+    await requireItemOnBoard(req.params.id, req.params.itemId);
+    const actorName = resolveDisplayName(access, req.user!.name);
+    await prisma.comment.create({
+      data: {
+        boardId: req.params.id,
+        actionItemId: req.params.itemId,
+        authorId: req.user!.id,
+        authorName: actorName,
+        text,
+      },
+    });
+    await notifyMentions({
+      boardId: req.params.id,
+      actionItemId: req.params.itemId,
+      actorId: req.user!.id,
+      actorName,
+      text,
+    }).catch(() => {});
+    const comments = await prisma.comment.findMany({
+      where: { actionItemId: req.params.itemId },
+      orderBy: { createdAt: "asc" },
+    });
+    res.status(201).json({ comments: comments.map(serializeComment) });
   }),
 );

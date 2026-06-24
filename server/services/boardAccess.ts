@@ -1,6 +1,7 @@
 import { prisma } from "../prisma";
 import { ApiError } from "../lib/http";
 import { boardInclude, type BoardWithState } from "./boardInclude";
+import { getProjectAccess } from "./projectAccess";
 
 export type { BoardWithState };
 
@@ -35,9 +36,18 @@ export async function getBoardAccess(
     where: { boardId_userId: { boardId, userId } },
     select: { role: true, displayName: true },
   });
-  if (!membership) return null;
+  if (membership) {
+    return { board, role: membership.role as EffectiveRole, displayName: membership.displayName };
+  }
 
-  return { board, role: membership.role as EffectiveRole, displayName: membership.displayName };
+  // Inherit access from the owning project: anyone with project access can open
+  // every board in it, at their project role (a board share still works too).
+  if (board.projectId) {
+    const projectAccess = await getProjectAccess(userId, board.projectId);
+    if (projectAccess) return { board, role: projectAccess.role, displayName: null };
+  }
+
+  return null;
 }
 
 /**
@@ -123,6 +133,7 @@ export function serializeBoard(board: BoardWithState, role: EffectiveRole) {
     id: board.id,
     name: board.name,
     ownerId: board.ownerId,
+    projectId: board.projectId,
     role,
     createdAt: board.createdAt.toISOString(),
     updatedAt: board.updatedAt.toISOString(),

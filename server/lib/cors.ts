@@ -5,8 +5,13 @@ import { env, isProduction } from "../env";
 // Origins allowed to make browser (credentialed) requests to the API and to
 // open a Socket.IO connection. In production this is the deployed frontend
 // (APP_URL). In development we also allow the Vite dev server so the app can be
-// run without the proxy if desired.
-const devOrigins = ["http://localhost:5173", "http://127.0.0.1:5173"];
+// run without the proxy if desired. 5173 is Vite's default; 3001 is the port
+// this project's dev server is run on.
+const devPorts = [5173, 3001];
+const devOrigins = devPorts.flatMap((p) => [
+  `http://localhost:${p}`,
+  `http://127.0.0.1:${p}`,
+]);
 
 export const allowedOrigins: string[] = [
   ...(env.APP_URL ? [env.APP_URL.replace(/\/$/, "")] : []),
