@@ -123,12 +123,8 @@ export function serializeBoardState(board: BoardWithState) {
   };
 }
 
-/**
- * Board metadata + state for a specific viewer. The share token is only included
- * for the owner, since anyone holding it gains access.
- */
+/** Board metadata + state for a specific viewer. */
 export function serializeBoard(board: BoardWithState, role: EffectiveRole) {
-  const isOwner = role === "OWNER";
   return {
     id: board.id,
     name: board.name,
@@ -137,12 +133,6 @@ export function serializeBoard(board: BoardWithState, role: EffectiveRole) {
     role,
     createdAt: board.createdAt.toISOString(),
     updatedAt: board.updatedAt.toISOString(),
-    share: {
-      enabled: board.shareToken != null,
-      role: board.shareRole,
-      // Only the owner can read the actual token (used to build the link).
-      token: isOwner ? board.shareToken : null,
-    },
     ...serializeBoardState(board),
   };
 }

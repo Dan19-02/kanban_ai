@@ -69,10 +69,6 @@ export const analyzeSchema = z.object({
     .max(100_000, "Transcript is too long (max 100k characters)"),
 });
 
-export const shareSchema = z.object({
-  role: z.enum(["EDITOR", "VIEWER"]).default("EDITOR"),
-});
-
 export const addMemberSchema = z.object({
   email: z.string().trim().toLowerCase().email("A valid email is required"),
   role: z.enum(["EDITOR", "VIEWER"]).default("EDITOR"),
@@ -80,10 +76,6 @@ export const addMemberSchema = z.object({
 
 export const displayNameSchema = z.object({
   displayName: z.string().trim().min(1, "Please enter a name").max(60, "That name is too long"),
-});
-
-export const joinSchema = z.object({
-  token: z.string().min(1, "A share token is required"),
 });
 
 // --- Action items ---

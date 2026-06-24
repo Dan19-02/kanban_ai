@@ -58,9 +58,8 @@ export async function requireProjectOwner(
   return access.project;
 }
 
-/** API shape for a project. The share token is only revealed to the owner. */
+/** API shape for a project. */
 export function serializeProject(project: Project, role: ProjectRole = "OWNER") {
-  const isOwner = role === "OWNER";
   return {
     id: project.id,
     name: project.name,
@@ -68,11 +67,6 @@ export function serializeProject(project: Project, role: ProjectRole = "OWNER") 
     color: project.color,
     archived: project.archived,
     role,
-    share: {
-      enabled: project.shareToken != null,
-      role: project.shareRole,
-      token: isOwner ? project.shareToken : null,
-    },
     createdAt: project.createdAt.toISOString(),
     updatedAt: project.updatedAt.toISOString(),
   };

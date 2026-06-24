@@ -1,15 +1,11 @@
 import { Router } from "express";
-import crypto from "crypto";
 import { prisma } from "../prisma";
-import { env } from "../env";
 import { asyncHandler, ApiError } from "../lib/http";
 import { parse } from "../lib/validate";
 import {
   createBoardSchema,
   updateBoardSchema,
   analyzeSchema,
-  shareSchema,
-  joinSchema,
   addMemberSchema,
   displayNameSchema,
   createActionItemSchema,
@@ -37,11 +33,6 @@ export const boardsRouter = Router();
 
 // Every board route requires an authenticated user.
 boardsRouter.use(requireAuth);
-
-function shareUrl(req: { protocol: string; get(h: string): string | undefined }, boardId: string, token: string) {
-  const base = env.APP_URL ?? `${req.protocol}://${req.get("host")}`;
-  return `${base.replace(/\/$/, "")}/board/${boardId}?token=${token}`;
-}
 
 /** Reload a board with its state relations (used after a mutation). */
 async function reload(boardId: string): Promise<BoardWithState> {
@@ -112,31 +103,6 @@ boardsRouter.post(
       include: boardInclude,
     });
     res.status(201).json({ board: serializeBoard(board, "OWNER") });
-  }),
-);
-
-// --- Join via share link (must precede "/:id" routes) -----------------------
-
-boardsRouter.post(
-  "/join",
-  asyncHandler(async (req, res) => {
-    const { token } = parse(joinSchema, req.body);
-    const userId = req.user!.id;
-
-    const board = await prisma.board.findUnique({ where: { shareToken: token } });
-    if (!board || !board.shareToken) {
-      throw new ApiError(404, "This share link is invalid or has been disabled");
-    }
-
-    if (board.ownerId !== userId) {
-      await prisma.boardMember.upsert({
-        where: { boardId_userId: { boardId: board.id, userId } },
-        update: {}, // keep an existing (possibly higher) role
-        create: { boardId: board.id, userId, role: board.shareRole ?? "EDITOR" },
-      });
-    }
-
-    res.json({ boardId: board.id });
   }),
 );
 
@@ -268,38 +234,6 @@ boardsRouter.post(
   }),
 );
 
-// --- Sharing ----------------------------------------------------------------
-
-boardsRouter.post(
-  "/:id/share",
-  asyncHandler(async (req, res) => {
-    await requireBoardAccess(req.user!.id, req.params.id, "OWNER");
-    const { role } = parse(shareSchema, req.body);
-    const token = crypto.randomBytes(24).toString("base64url");
-
-    await prisma.board.update({
-      where: { id: req.params.id },
-      data: { shareToken: token, shareRole: role },
-    });
-
-    res.json({
-      share: { enabled: true, role, token, url: shareUrl(req, req.params.id, token) },
-    });
-  }),
-);
-
-boardsRouter.delete(
-  "/:id/share",
-  asyncHandler(async (req, res) => {
-    await requireBoardAccess(req.user!.id, req.params.id, "OWNER");
-    await prisma.board.update({
-      where: { id: req.params.id },
-      data: { shareToken: null, shareRole: null },
-    });
-    res.json({ share: { enabled: false, role: null, token: null } });
-  }),
-);
-
 // --- Members ----------------------------------------------------------------
 
 boardsRouter.get(
@@ -350,7 +284,7 @@ boardsRouter.post(
     if (!user) {
       throw new ApiError(
         404,
-        "No account uses that email yet. Ask them to sign up, or share the invite link instead.",
+        "No account uses that email yet. Ask them to sign up first, then add them here.",
       );
     }
     const board = await prisma.board.findUniqueOrThrow({

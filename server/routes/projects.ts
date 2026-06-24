@@ -1,20 +1,11 @@
 import { Router } from "express";
-import crypto from "crypto";
 import type { Prisma } from "@prisma/client";
 import { prisma } from "../prisma";
-import { env } from "../env";
 import { asyncHandler, ApiError } from "../lib/http";
 import { parse } from "../lib/validate";
-import {
-  createProjectSchema,
-  updateProjectSchema,
-  shareSchema,
-  joinSchema,
-  addMemberSchema,
-} from "../validation";
+import { createProjectSchema, updateProjectSchema, addMemberSchema } from "../validation";
 import { requireAuth } from "../auth/middleware";
 import {
-  getProjectAccess,
   requireProjectAccess,
   requireProjectOwner,
   serializeProject,
@@ -24,15 +15,6 @@ import {
 export const projectsRouter = Router();
 
 projectsRouter.use(requireAuth);
-
-function shareUrl(
-  req: { protocol: string; get(h: string): string | undefined },
-  projectId: string,
-  token: string,
-) {
-  const base = env.APP_URL ?? `${req.protocol}://${req.get("host")}`;
-  return `${base.replace(/\/$/, "")}/project/${projectId}?token=${token}`;
-}
 
 /** Boards-with-counts needed to compute a project's rollup numbers. */
 const listInclude = {
@@ -123,31 +105,6 @@ projectsRouter.post(
   }),
 );
 
-// --- Join via share link (must precede "/:id" routes) -----------------------
-
-projectsRouter.post(
-  "/join",
-  asyncHandler(async (req, res) => {
-    const { token } = parse(joinSchema, req.body);
-    const userId = req.user!.id;
-
-    const project = await prisma.project.findUnique({ where: { shareToken: token } });
-    if (!project || !project.shareToken) {
-      throw new ApiError(404, "This share link is invalid or has been disabled");
-    }
-
-    if (project.ownerId !== userId) {
-      await prisma.projectMember.upsert({
-        where: { projectId_userId: { projectId: project.id, userId } },
-        update: {}, // keep an existing (possibly higher) role
-        create: { projectId: project.id, userId, role: project.shareRole ?? "EDITOR" },
-      });
-    }
-
-    res.json({ projectId: project.id });
-  }),
-);
-
 // --- Single project: read / update / delete ---------------------------------
 
 projectsRouter.get(
@@ -226,36 +183,6 @@ projectsRouter.get(
   }),
 );
 
-// --- Sharing (owner only) ---------------------------------------------------
-
-projectsRouter.post(
-  "/:id/share",
-  asyncHandler(async (req, res) => {
-    await requireProjectOwner(req.user!.id, req.params.id);
-    const { role } = parse(shareSchema, req.body);
-    const token = crypto.randomBytes(24).toString("base64url");
-    await prisma.project.update({
-      where: { id: req.params.id },
-      data: { shareToken: token, shareRole: role },
-    });
-    res.json({
-      share: { enabled: true, role, token, url: shareUrl(req, req.params.id, token) },
-    });
-  }),
-);
-
-projectsRouter.delete(
-  "/:id/share",
-  asyncHandler(async (req, res) => {
-    await requireProjectOwner(req.user!.id, req.params.id);
-    await prisma.project.update({
-      where: { id: req.params.id },
-      data: { shareToken: null, shareRole: null },
-    });
-    res.json({ share: { enabled: false, role: null, token: null } });
-  }),
-);
-
 // --- Members (owner only) ---------------------------------------------------
 
 projectsRouter.get(
@@ -296,7 +223,7 @@ projectsRouter.post(
     if (!user) {
       throw new ApiError(
         404,
-        "No account uses that email yet. Ask them to sign up, or share the invite link instead.",
+        "No account uses that email yet. Ask them to sign up first, then add them here.",
       );
     }
     const project = await prisma.project.findUniqueOrThrow({
