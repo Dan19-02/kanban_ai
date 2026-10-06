@@ -12,6 +12,12 @@ export interface BoardAccess {
   role: EffectiveRole;
   /** The member's chosen board display name (null for owner or unset members). */
   displayName: string | null;
+  /**
+   * Where the access comes from: owning the board, a membership row on the
+   * board, or the project the board is filed under. Only a board membership can
+   * hold a board display name.
+   */
+  via: "owner" | "member" | "project";
 }
 
 const RANK: Record<EffectiveRole, number> = { VIEWER: 1, EDITOR: 2, OWNER: 3 };
@@ -30,21 +36,28 @@ export async function getBoardAccess(
   });
   if (!board) return null;
 
-  if (board.ownerId === userId) return { board, role: "OWNER", displayName: null };
+  if (board.ownerId === userId) return { board, role: "OWNER", displayName: null, via: "owner" };
 
   const membership = await prisma.boardMember.findUnique({
     where: { boardId_userId: { boardId, userId } },
     select: { role: true, displayName: true },
   });
   if (membership) {
-    return { board, role: membership.role as EffectiveRole, displayName: membership.displayName };
+    return {
+      board,
+      role: membership.role as EffectiveRole,
+      displayName: membership.displayName,
+      via: "member",
+    };
   }
 
   // Inherit access from the owning project: anyone with project access can open
   // every board in it, at their project role (a board share still works too).
   if (board.projectId) {
     const projectAccess = await getProjectAccess(userId, board.projectId);
-    if (projectAccess) return { board, role: projectAccess.role, displayName: null };
+    if (projectAccess) {
+      return { board, role: projectAccess.role, displayName: null, via: "project" };
+    }
   }
 
   return null;
@@ -73,9 +86,13 @@ export function resolveDisplayName(access: BoardAccess, accountName: string): st
   return access.role === "OWNER" ? accountName : access.displayName ?? accountName;
 }
 
-/** Whether a member still needs to choose a board display name. */
+/**
+ * Whether a member still needs to choose a board display name. Owners and
+ * people who reach the board through its project go by their account name, so
+ * they are never asked.
+ */
 export function needsDisplayName(access: BoardAccess): boolean {
-  return access.role !== "OWNER" && !access.displayName;
+  return access.via === "member" && !access.displayName;
 }
 
 // --- Serialization (DB shape -> client/API shape) ---

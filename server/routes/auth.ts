@@ -7,9 +7,10 @@ import { registerSchema, loginSchema } from "../validation";
 import { hashPassword, verifyPassword } from "../auth/password";
 import { signAuthToken } from "../auth/jwt";
 import { setAuthCookie, clearAuthCookie } from "../auth/cookies";
-import { requireAuth } from "../auth/middleware";
+import { requireAuth, authenticateToken, getRequestToken } from "../auth/middleware";
 import { authLimiter } from "../middleware/rateLimit";
 import { serializeUser } from "../services/users";
+import { disconnectUser } from "../realtime";
 
 export const authRouter = Router();
 
@@ -35,7 +36,7 @@ authRouter.post(
       throw err;
     }
 
-    const token = signAuthToken({ sub: user.id, email: user.email });
+    const token = signAuthToken({ sub: user.id, email: user.email, tv: user.tokenVersion });
     setAuthCookie(res, token);
     // Return the token in the body too, so the SPA can authenticate cross-origin
     // via an Authorization header (mobile blocks third-party cookies).
@@ -60,7 +61,7 @@ authRouter.post(
       throw new ApiError(401, "Invalid email or password");
     }
 
-    const token = signAuthToken({ sub: user.id, email: user.email });
+    const token = signAuthToken({ sub: user.id, email: user.email, tv: user.tokenVersion });
     setAuthCookie(res, token);
     res.json({ user: serializeUser(user), token });
   }),
@@ -68,7 +69,24 @@ authRouter.post(
 
 authRouter.post(
   "/logout",
-  asyncHandler(async (_req, res) => {
+  asyncHandler(async (req, res) => {
+    // Retire every token issued to this user so far, so a copied token stops
+    // working the moment they sign out (this signs the account out everywhere).
+    // Signing out must still succeed with an expired token or while the database
+    // is unreachable, so this step is best effort.
+    try {
+      const user = await authenticateToken(getRequestToken(req));
+      if (user) {
+        await prisma.user.update({
+          where: { id: user.id },
+          data: { tokenVersion: { increment: 1 } },
+        });
+        disconnectUser(user.id);
+      }
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error("Could not retire tokens on sign-out:", err);
+    }
     clearAuthCookie(res);
     res.json({ ok: true });
   }),
