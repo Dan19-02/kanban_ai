@@ -37,8 +37,10 @@ services:
       # and cross-site auth cookies work. e.g. https://kanban-ai-frontend.onrender.com
       - key: APP_URL
         sync: false
-      # AI analysis (NVIDIA-hosted models). Optional; analyze returns a clear error
-      # if unset.
+      # AI analysis. Set at least one; analyze returns a clear error if neither is
+      # set. Nebius is tried first, NVIDIA is the fallback.
+      - key: NEBIUS_API_KEY
+        sync: false
       - key: NVIDIA_API_KEY
         sync: false
       # Optional: shared parent domain for first-party cookies (custom domains).

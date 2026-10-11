@@ -23,13 +23,15 @@ const schema = z.object({
     .string()
     .min(32, "JWT_SECRET must be at least 32 characters. Generate one with: openssl rand -base64 48"),
 
-  // NVIDIA API key for AI transcript analysis. Optional at boot — the analyze
-  // endpoint returns a clear error if it is missing, so the rest of the app
-  // still runs without it.
+  // API keys for AI transcript analysis. Both optional at boot — the analyze
+  // endpoint returns a clear error if neither is set, so the rest of the app
+  // still runs without them. Nebius is tried first when its key is present.
+  NEBIUS_API_KEY: z.string().optional(),
   NVIDIA_API_KEY: z.string().optional(),
 
-  // Comma-separated NVIDIA model ids to try, in order. Optional: the default
-  // list lives in services/ai.ts. Set this to switch models without a deploy.
+  // Comma-separated model ids to try on each host, in order. Optional: the
+  // defaults live in services/ai.ts. Set these to switch models without a deploy.
+  NEBIUS_MODELS: z.string().optional(),
   NVIDIA_MODELS: z.string().optional(),
 
   // Public URL of the frontend. Used for CORS allow-listing, building share
