@@ -162,6 +162,11 @@ GENERAL:
 - Write plain sentences. Never use an em dash or an en dash; use a comma or a full stop instead.
 - Return ONLY the JSON object. No markdown, no code fences, no explanation.`;
 
+/** Names of the hosts that have an API key set. Shown by the health check. */
+export function configuredAiHosts(): string[] {
+  return PROVIDERS.filter((p) => !!env[p.keyVar]).map((p) => p.name);
+}
+
 /** Why one attempt failed, and how much of the remaining list it rules out. */
 class ModelAttemptError extends Error {
   constructor(
@@ -325,6 +330,8 @@ export async function analyzeTranscript(
 
   let last: ModelAttemptError | undefined;
   const skipped = new Set<string>();
+  // Settings whose key a host rejected, for the message if nothing works.
+  const rejectedKeys: string[] = [];
   for (const target of targets) {
     if (skipped.has(target.provider.name)) continue;
     const label = `${target.provider.name} ${target.model}`;
@@ -336,9 +343,21 @@ export async function analyzeTranscript(
       if (!(err instanceof ModelAttemptError)) throw err;
       console.error(`AI model failed (${label}): ${err.message}`);
       last = err;
-      if (err.skipProvider) skipped.add(target.provider.name);
+      if (err.skipProvider) {
+        skipped.add(target.provider.name);
+        rejectedKeys.push(target.provider.keyVar);
+      }
     }
   }
 
+  // When every host that was tried turned the key away, say which settings to
+  // check. Naming only the last one would hide a problem with the first.
+  const hostsTried = new Set(targets.map((t) => t.provider.name)).size;
+  if (rejectedKeys.length > 0 && rejectedKeys.length === hostsTried) {
+    throw new ApiError(
+      502,
+      `The AI service rejected the server's API key. Ask the site owner to check ${rejectedKeys.join(" and ")}.`,
+    );
+  }
   throw new ApiError(502, last?.userMessage ?? "AI analysis failed. Please try again.");
 }
