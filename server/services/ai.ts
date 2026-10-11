@@ -28,21 +28,47 @@ export interface TranscriptAnalysis {
   openQuestions: string[];
 }
 
-const NVIDIA_API_URL = "https://integrate.api.nvidia.com/v1/chat/completions";
+// Analysis can run on more than one host. Each is OpenAI-compatible; a host is
+// used when its API key is set, and they are tried in this order.
+//
+// Measured with this prompt on the same two transcripts, DeepSeek V4.1 Flash
+// with reasoning off answered in about 4 seconds on Nebius and about 70 seconds
+// on NVIDIA, so Nebius goes first.
+interface Provider {
+  name: string;
+  url: string;
+  /** Name of the environment variable that holds the key (used in messages). */
+  keyVar: "NEBIUS_API_KEY" | "NVIDIA_API_KEY";
+  /** Name of the variable that overrides the model list. */
+  modelsVar: "NEBIUS_MODELS" | "NVIDIA_MODELS";
+  /** Models to try, in order, unless the override is set. */
+  defaultModels: string[];
+}
 
-// Models to try, in order. The first is the one the owner chose. NVIDIA
-// retires hosted models without notice (the original, minimaxai/minimax-m3,
-// started answering 410 Gone), so the rest are fallbacks. Override the whole
-// list with NVIDIA_MODELS (comma-separated).
-const DEFAULT_MODELS = [
-  "deepseek-ai/deepseek-v4.1-flash",
-  "nvidia/nemotron-3-super-120b-a12b",
+// NVIDIA retires hosted models without notice (the original and only model,
+// minimaxai/minimax-m3, started answering 410 Gone), which is why there is a
+// list and a second host rather than a single model.
+const PROVIDERS: Provider[] = [
+  {
+    name: "Nebius",
+    url: "https://api.tokenfactory.us-north1.nebius.com/v1/chat/completions",
+    keyVar: "NEBIUS_API_KEY",
+    modelsVar: "NEBIUS_MODELS",
+    defaultModels: ["deepseek-ai/DeepSeek-V4.1-Flash"],
+  },
+  {
+    name: "NVIDIA",
+    url: "https://integrate.api.nvidia.com/v1/chat/completions",
+    keyVar: "NVIDIA_API_KEY",
+    modelsVar: "NVIDIA_MODELS",
+    defaultModels: ["deepseek-ai/deepseek-v4.1-flash", "nvidia/nemotron-3-super-120b-a12b"],
+  },
 ];
 
-// Extra request fields per model family. DeepSeek reasons before it answers;
-// left on, the reasoning took about three minutes per transcript and sometimes
-// used the whole max_tokens budget, leaving an empty reply. With it off the
-// same transcripts took about 70 seconds and always produced a reply.
+// Extra request fields per model family. DeepSeek reasons before it answers.
+// Left on, the reasoning made replies several times slower and on NVIDIA
+// sometimes used the whole max_tokens budget, leaving an empty reply. Owner
+// attribution was as good with it off.
 const MODEL_EXTRAS: { prefix: string; fields: Record<string, unknown> }[] = [
   {
     prefix: "deepseek-ai/",
@@ -51,27 +77,39 @@ const MODEL_EXTRAS: { prefix: string; fields: Record<string, unknown> }[] = [
 ];
 
 const extrasFor = (model: string): Record<string, unknown> =>
-  MODEL_EXTRAS.find((m) => model.startsWith(m.prefix))?.fields ?? {};
+  MODEL_EXTRAS.find((m) => model.toLowerCase().startsWith(m.prefix))?.fields ?? {};
 
 // One model gets this long before we move on to the next.
 const MODEL_TIMEOUT_MS = 240_000;
 
-function getModels(): string[] {
-  const configured = (env.NVIDIA_MODELS ?? "")
-    .split(",")
-    .map((m) => m.trim())
-    .filter(Boolean);
-  return configured.length > 0 ? configured : DEFAULT_MODELS;
+/** One host and model to ask. */
+interface Target {
+  provider: Provider;
+  apiKey: string;
+  model: string;
 }
 
-function getApiKey(): string {
-  if (!env.NVIDIA_API_KEY) {
+/** Every host and model to try, in order. Hosts without a key are left out. */
+function getTargets(): Target[] {
+  const targets: Target[] = [];
+  for (const provider of PROVIDERS) {
+    const apiKey = env[provider.keyVar];
+    if (!apiKey) continue;
+    const configured = (env[provider.modelsVar] ?? "")
+      .split(",")
+      .map((m) => m.trim())
+      .filter(Boolean);
+    for (const model of configured.length > 0 ? configured : provider.defaultModels) {
+      targets.push({ provider, apiKey, model });
+    }
+  }
+  if (targets.length === 0) {
     throw new ApiError(
       503,
-      "AI analysis is not configured. Set NVIDIA_API_KEY on the server.",
+      "AI analysis is not configured. Set NEBIUS_API_KEY or NVIDIA_API_KEY on the server.",
     );
   }
-  return env.NVIDIA_API_KEY;
+  return targets;
 }
 
 const SYSTEM_PROMPT = `You are an expert meeting analyst for an enterprise meeting-intelligence platform. Analyze the transcript and return ONLY a raw JSON object (no markdown, no code fences, no commentary) with EXACTLY this structure:
@@ -124,13 +162,18 @@ GENERAL:
 - Write plain sentences. Never use an em dash or an en dash; use a comma or a full stop instead.
 - Return ONLY the JSON object. No markdown, no code fences, no explanation.`;
 
-/** Why one model's attempt failed, and whether the next model is worth trying. */
+/** Names of the hosts that have an API key set. Shown by the health check. */
+export function configuredAiHosts(): string[] {
+  return PROVIDERS.filter((p) => !!env[p.keyVar]).map((p) => p.name);
+}
+
+/** Why one attempt failed, and how much of the remaining list it rules out. */
 class ModelAttemptError extends Error {
   constructor(
     message: string,
-    /** False when the problem is ours (bad key, no access), not the model's. */
-    readonly tryNext: boolean,
-    /** What the user is told if every attempt fails this way. */
+    /** True when the host rejected our key: its other models will fail too. */
+    readonly skipProvider: boolean,
+    /** What the user is told if every attempt fails and this was the last. */
     readonly userMessage: string,
   ) {
     super(message);
@@ -201,12 +244,9 @@ export function normalizeAnalysis(parsed: unknown): TranscriptAnalysis {
   };
 }
 
-/** Ask one model for the analysis. Throws ModelAttemptError on any failure. */
-async function analyzeWith(
-  model: string,
-  apiKey: string,
-  transcript: string,
-): Promise<TranscriptAnalysis> {
+/** Ask one host and model for the analysis. Throws ModelAttemptError on any failure. */
+async function analyzeWith(target: Target, transcript: string): Promise<TranscriptAnalysis> {
+  const { provider, apiKey, model } = target;
   const payload = {
     model,
     messages: [
@@ -225,7 +265,7 @@ async function analyzeWith(
 
   let res: Response;
   try {
-    res = await fetch(NVIDIA_API_URL, {
+    res = await fetch(provider.url, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${apiKey}`,
@@ -238,21 +278,22 @@ async function analyzeWith(
   } catch (err) {
     throw new ModelAttemptError(
       `request failed: ${err instanceof Error ? err.message : String(err)}`,
-      true,
+      false,
       "Failed to reach the AI service. Please try again.",
     );
   }
 
   if (!res.ok) {
     const errorText = await res.text().catch(() => "Unknown error");
-    // 401 and 403 mean the key is wrong or lacks access: another model will
-    // not help. Everything else (retired model, overload, bad gateway) might.
-    const ours = res.status === 401 || res.status === 403;
+    // 401 and 403 mean the key is wrong or lacks access, so this host's other
+    // models will not help. Everything else (retired model, overload, bad
+    // gateway) is about this one model.
+    const keyRejected = res.status === 401 || res.status === 403;
     throw new ModelAttemptError(
       `HTTP ${res.status}: ${errorText.slice(0, 300)}`,
-      !ours,
-      ours
-        ? "The AI service rejected the server's API key. Ask the site owner to check NVIDIA_API_KEY."
+      keyRejected,
+      keyRejected
+        ? `The AI service rejected the server's API key. Ask the site owner to check ${provider.keyVar}.`
         : `AI service returned an error (${res.status}). Please try again.`,
     );
   }
@@ -262,7 +303,7 @@ async function analyzeWith(
   if (typeof text !== "string" || text.trim() === "") {
     throw new ModelAttemptError(
       "empty reply",
-      true,
+      false,
       "The AI returned an empty response. Please try again.",
     );
   }
@@ -272,35 +313,51 @@ async function analyzeWith(
   } catch (err) {
     throw new ModelAttemptError(
       `unusable reply (${err instanceof Error ? err.message : String(err)}): ${text.slice(0, 300)}`,
-      true,
+      false,
       "The AI returned malformed data. Please try again.",
     );
   }
 }
 
 /**
- * Send a transcript to an NVIDIA-hosted model and return the structured
- * meeting analysis. Models are tried in order until one gives a usable reply.
+ * Send a transcript to a hosted model and return the structured meeting
+ * analysis. Hosts and models are tried in order until one gives a usable reply.
  */
 export async function analyzeTranscript(
   transcript: string,
 ): Promise<TranscriptAnalysis> {
-  const apiKey = getApiKey();
-  const models = getModels();
+  const targets = getTargets();
 
   let last: ModelAttemptError | undefined;
-  for (const model of models) {
+  const skipped = new Set<string>();
+  // Settings whose key a host rejected, for the message if nothing works.
+  const rejectedKeys: string[] = [];
+  for (const target of targets) {
+    if (skipped.has(target.provider.name)) continue;
+    const label = `${target.provider.name} ${target.model}`;
     try {
-      const analysis = await analyzeWith(model, apiKey, transcript);
-      if (last) console.warn(`AI analysis succeeded with fallback model ${model}`);
+      const analysis = await analyzeWith(target, transcript);
+      if (last) console.warn(`AI analysis succeeded with fallback: ${label}`);
       return analysis;
     } catch (err) {
       if (!(err instanceof ModelAttemptError)) throw err;
-      console.error(`AI model ${model} failed: ${err.message}`);
+      console.error(`AI model failed (${label}): ${err.message}`);
       last = err;
-      if (!err.tryNext) break;
+      if (err.skipProvider) {
+        skipped.add(target.provider.name);
+        rejectedKeys.push(target.provider.keyVar);
+      }
     }
   }
 
+  // When every host that was tried turned the key away, say which settings to
+  // check. Naming only the last one would hide a problem with the first.
+  const hostsTried = new Set(targets.map((t) => t.provider.name)).size;
+  if (rejectedKeys.length > 0 && rejectedKeys.length === hostsTried) {
+    throw new ApiError(
+      502,
+      `The AI service rejected the server's API key. Ask the site owner to check ${rejectedKeys.join(" and ")}.`,
+    );
+  }
   throw new ApiError(502, last?.userMessage ?? "AI analysis failed. Please try again.");
 }

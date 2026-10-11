@@ -21,6 +21,7 @@ import { notificationsRouter } from "./routes/notifications";
 import { billingRouter } from "./routes/billing";
 import { constructWebhookEvent, handleWebhookEvent } from "./services/billing";
 import { initRealtime } from "./realtime";
+import { configuredAiHosts } from "./services/ai";
 
 // Prisma error codes that mean the database could not be reached or timed out.
 const DATABASE_DOWN_CODES = new Set(["P1001", "P1002", "P1008", "P1017", "P2024"]);
@@ -116,8 +117,14 @@ async function startServer() {
   // --- API ---
   // Liveness only: it says the process is up and which commit it runs. The host
   // polls it, so it never touches the database.
+  // `ai` lists the hosts that have an API key set (names only, never the keys),
+  // so a missing or misnamed key can be spotted without opening the dashboard.
   app.get("/api/health", (_req, res) =>
-    res.json({ ok: true, commit: process.env.RENDER_GIT_COMMIT?.slice(0, 7) }),
+    res.json({
+      ok: true,
+      commit: process.env.RENDER_GIT_COMMIT?.slice(0, 7),
+      ai: configuredAiHosts(),
+    }),
   );
 
   app.use("/api", apiLimiter);
