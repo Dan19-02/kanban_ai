@@ -11,7 +11,7 @@ deployed as its own static site.
 | Runtime  | Node.js 20+, Express, Socket.IO                   |
 | Database | PostgreSQL via Prisma ORM                         |
 | Auth     | bcrypt + JWT (HS256) in an httpOnly cookie        |
-| AI       | NVIDIA MiniMax M3 (`/v1/chat/completions`)        |
+| AI       | NVIDIA-hosted models (`/v1/chat/completions`)     |
 | Payments | Stripe subscriptions (Checkout + Billing Portal)  |
 
 ## Architecture
@@ -59,6 +59,7 @@ first-party locally.
 | `JWT_SECRET`            | yes      | ≥ 32 random chars. Signs session JWTs.                     |
 | `APP_URL`               | prod     | Frontend origin. Locks down CORS + builds share links.     |
 | `NVIDIA_API_KEY`        | no       | Enables AI analysis. Without it, analyze returns an error. |
+| `NVIDIA_MODELS`         | no       | Comma-separated model ids to try, in order. Defaults to the list in `server/services/ai.ts`. |
 | `COOKIE_DOMAIN`         | no       | Shared parent domain for first-party cross-subdomain auth. |
 | `NODE_ENV` / `PORT`     | no       | Default `development` / `3000` (Render injects `PORT`).    |
 | `STRIPE_*`              | no       | Enables paid plans; free tier works without them.          |
