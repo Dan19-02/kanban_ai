@@ -30,9 +30,39 @@ export interface TranscriptAnalysis {
 
 const NVIDIA_API_URL = "https://integrate.api.nvidia.com/v1/chat/completions";
 
-// Give up on a reply that takes longer than this, so a stalled call cannot hold
-// a request (and the transcription reserved for it) open indefinitely.
-const AI_TIMEOUT_MS = 120_000;
+// Models to try, in order. The first is the one the owner chose. NVIDIA
+// retires hosted models without notice (the original, minimaxai/minimax-m3,
+// started answering 410 Gone), so the rest are fallbacks. Override the whole
+// list with NVIDIA_MODELS (comma-separated).
+const DEFAULT_MODELS = [
+  "deepseek-ai/deepseek-v4.1-flash",
+  "nvidia/nemotron-3-super-120b-a12b",
+];
+
+// Extra request fields per model family. DeepSeek reasons before it answers;
+// left on, the reasoning took about three minutes per transcript and sometimes
+// used the whole max_tokens budget, leaving an empty reply. With it off the
+// same transcripts took about 70 seconds and always produced a reply.
+const MODEL_EXTRAS: { prefix: string; fields: Record<string, unknown> }[] = [
+  {
+    prefix: "deepseek-ai/",
+    fields: { chat_template_kwargs: { thinking: false, enable_thinking: false } },
+  },
+];
+
+const extrasFor = (model: string): Record<string, unknown> =>
+  MODEL_EXTRAS.find((m) => model.startsWith(m.prefix))?.fields ?? {};
+
+// One model gets this long before we move on to the next.
+const MODEL_TIMEOUT_MS = 240_000;
+
+function getModels(): string[] {
+  const configured = (env.NVIDIA_MODELS ?? "")
+    .split(",")
+    .map((m) => m.trim())
+    .filter(Boolean);
+  return configured.length > 0 ? configured : DEFAULT_MODELS;
+}
 
 function getApiKey(): string {
   if (!env.NVIDIA_API_KEY) {
@@ -94,14 +124,91 @@ GENERAL:
 - Write plain sentences. Never use an em dash or an en dash; use a comma or a full stop instead.
 - Return ONLY the JSON object. No markdown, no code fences, no explanation.`;
 
-/** Send a transcript to MiniMax M3 (via NVIDIA) and return the structured meeting analysis. */
-export async function analyzeTranscript(
+/** Why one model's attempt failed, and whether the next model is worth trying. */
+class ModelAttemptError extends Error {
+  constructor(
+    message: string,
+    /** False when the problem is ours (bad key, no access), not the model's. */
+    readonly tryNext: boolean,
+    /** What the user is told if every attempt fails this way. */
+    readonly userMessage: string,
+  ) {
+    super(message);
+  }
+}
+
+/**
+ * Pull the JSON object out of a model reply. Models wrap it in code fences,
+ * prefix it with <think> blocks, or add a sentence before or after.
+ */
+export function extractJson(raw: string): unknown {
+  const text = raw.replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
+  if (start === -1 || end <= start) throw new Error("no JSON object in reply");
+  return JSON.parse(text.slice(start, end + 1));
+}
+
+const asStrings = (value: unknown): string[] =>
+  Array.isArray(value)
+    ? value.filter((v): v is string => typeof v === "string" && v.trim() !== "")
+    : [];
+
+/** Coerce a parsed reply into the shape the rest of the app relies on. */
+export function normalizeAnalysis(parsed: unknown): TranscriptAnalysis {
+  if (!parsed || typeof parsed !== "object") throw new Error("reply is not an object");
+  const p = parsed as Record<string, any>;
+  if (typeof p.summary !== "string" || p.summary.trim() === "") {
+    throw new Error("reply has no summary");
+  }
+
+  const rawItems: any[] = Array.isArray(p.actionItems) ? p.actionItems : [];
+  const actionItems: AnalyzedActionItem[] = rawItems
+    .filter((i) => i && typeof i.title === "string" && i.title.trim() !== "")
+    .map((i) => {
+      const priority = String(i.priority ?? "").trim().toLowerCase();
+      return {
+        title: i.title.trim(),
+        assignee:
+          typeof i.assignee === "string" && i.assignee.trim() !== ""
+            ? i.assignee.trim()
+            : "Unassigned",
+        description: typeof i.description === "string" ? i.description : "",
+        priority: priority === "high" ? "High" : priority === "low" ? "Low" : "Medium",
+        blockedBy: asStrings(i.blockedBy),
+      };
+    });
+
+  // A task can only be blocked by another task on this board.
+  const titles = new Set(actionItems.map((i) => i.title));
+  for (const item of actionItems) {
+    item.blockedBy = item.blockedBy.filter((t) => titles.has(t) && t !== item.title);
+  }
+
+  const sentiment = p.sentimentInfo && typeof p.sentimentInfo === "object" ? p.sentimentInfo : {};
+  return {
+    summary: p.summary.trim(),
+    keyDecisions: asStrings(p.keyDecisions),
+    sentimentInfo: {
+      score: typeof sentiment.score === "string" && sentiment.score.trim() !== "" ? sentiment.score.trim() : "Neutral",
+      breakdown: typeof sentiment.breakdown === "string" ? sentiment.breakdown : "",
+    },
+    actionItems,
+    risks: asStrings(p.risks),
+    dependencies: asStrings(p.dependencies),
+    blockers: asStrings(p.blockers),
+    openQuestions: asStrings(p.openQuestions),
+  };
+}
+
+/** Ask one model for the analysis. Throws ModelAttemptError on any failure. */
+async function analyzeWith(
+  model: string,
+  apiKey: string,
   transcript: string,
 ): Promise<TranscriptAnalysis> {
-  const apiKey = getApiKey();
-
   const payload = {
-    model: "minimaxai/minimax-m3",
+    model,
     messages: [
       { role: "system", content: SYSTEM_PROMPT },
       {
@@ -113,12 +220,12 @@ export async function analyzeTranscript(
     temperature: 0.2,
     top_p: 0.95,
     stream: false,
-    chat_template_kwargs: { thinking_mode: "enabled" },
+    ...extrasFor(model),
   };
 
-  let responseBody: any;
+  let res: Response;
   try {
-    const res = await fetch(NVIDIA_API_URL, {
+    res = await fetch(NVIDIA_API_URL, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${apiKey}`,
@@ -126,156 +233,74 @@ export async function analyzeTranscript(
         Accept: "application/json",
       },
       body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(AI_TIMEOUT_MS),
+      signal: AbortSignal.timeout(MODEL_TIMEOUT_MS),
     });
-
-    if (!res.ok) {
-      const errorText = await res.text().catch(() => "Unknown error");
-      console.error(`NVIDIA API error ${res.status}: ${errorText}`);
-      throw new ApiError(
-        502,
-        `AI service returned an error (${res.status}). Please try again.`,
-      );
-    }
-
-    responseBody = await res.json();
   } catch (err) {
-    if (err instanceof ApiError) throw err;
-    if (err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError")) {
-      throw new ApiError(
-        504,
-        "The AI took too long to answer. Try again, or use a shorter transcript.",
-      );
-    }
-    console.error("NVIDIA API request failed:", err);
-    throw new ApiError(502, "Failed to reach the AI service. Please try again.");
-  }
-
-  const choice = responseBody?.choices?.[0];
-  const reply: unknown = choice?.message?.content;
-
-  if (typeof reply !== "string" || !reply.trim()) {
-    throw new ApiError(502, "The AI returned an empty response. Please try again.");
-  }
-
-  let data: unknown;
-  try {
-    data = JSON.parse(extractJson(reply));
-  } catch {
-    console.error("AI returned malformed JSON:", reply.slice(0, 500));
-    throw new ApiError(
-      502,
-      choice?.finish_reason === "length"
-        ? "The AI ran out of room before it finished. Try a shorter transcript."
-        : "The AI returned malformed data. Please try again.",
+    throw new ModelAttemptError(
+      `request failed: ${err instanceof Error ? err.message : String(err)}`,
+      true,
+      "Failed to reach the AI service. Please try again.",
     );
   }
 
-  return normalizeAnalysis(data);
-}
-
-/**
- * The JSON object inside a reply. The model is told to answer with bare JSON,
- * but it may put its reasoning in <think> tags first and wrap the object in a
- * code fence, in any combination. Dropping the reasoning and cutting from the
- * first "{" to the last "}" covers all of them.
- */
-function extractJson(reply: string): string {
-  const text = reply.replace(/<think>[\s\S]*?<\/think>/gi, "");
-  const start = text.indexOf("{");
-  const end = text.lastIndexOf("}");
-  return start !== -1 && end > start ? text.slice(start, end + 1) : text.trim();
-}
-
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null && !Array.isArray(value);
-
-/**
- * The product writes no long dashes, but the model sometimes does. A dash
- * between two numbers becomes a hyphen; any other becomes a comma.
- */
-const plainDashes = (value: string): string =>
-  value
-    .replace(/(\d)\s*[\u2013\u2014]\s*(\d)/g, "$1-$2")
-    .replace(/\s*[\u2013\u2014]\s*/g, ", ")
-    .replace(/^,\s*|,\s*$/g, "");
-
-/** A trimmed string no longer than `max`, or "" for anything that is not text. */
-const text = (value: unknown, max: number): string =>
-  typeof value === "string" ? plainDashes(value.trim()).slice(0, max).trim() : "";
-
-/** A list of non-empty strings, or [] for anything that is not a list. */
-const list = (value: unknown, maxItems = 40, maxLength = 600): string[] =>
-  Array.isArray(value)
-    ? value
-        .map((entry) => text(entry, maxLength))
-        .filter(Boolean)
-        .slice(0, maxItems)
-    : [];
-
-// Words the model uses for a priority, mapped to the three the board knows.
-const PRIORITY_WORDS: Record<string, Priority> = {
-  high: "High",
-  urgent: "High",
-  critical: "High",
-  highest: "High",
-  medium: "Medium",
-  normal: "Medium",
-  moderate: "Medium",
-  low: "Low",
-  minor: "Low",
-  lowest: "Low",
-};
-
-/**
- * Turn whatever the model sent into the exact shape the board stores. Missing
- * or mistyped parts fall back to safe values, so one odd field cannot fail the
- * whole analysis; a reply with no summary at all is rejected.
- */
-function normalizeAnalysis(data: unknown): TranscriptAnalysis {
-  const incomplete = () =>
-    new ApiError(502, "The AI returned an incomplete analysis. Please try again.");
-  if (!isRecord(data)) throw incomplete();
-
-  const summary = text(data.summary, 4000);
-  if (!summary) throw incomplete();
-
-  const sentiment = isRecord(data.sentimentInfo) ? data.sentimentInfo : {};
-
-  const actionItems: AnalyzedActionItem[] = (
-    Array.isArray(data.actionItems) ? data.actionItems : []
-  )
-    .filter(isRecord)
-    .map((item) => ({
-      title: text(item.title, 300),
-      assignee: text(item.assignee, 120) || "Unassigned",
-      description: text(item.description, 5000),
-      priority: PRIORITY_WORDS[text(item.priority, 20).toLowerCase()] ?? null,
-      blockedBy: list(item.blockedBy, 20, 300),
-    }))
-    .filter((item) => item.title)
-    .slice(0, 100);
-
-  // A task can only wait on another task in this list, named by its exact title.
-  const titles = new Map(actionItems.map((item) => [item.title.toLowerCase(), item.title]));
-  for (const item of actionItems) {
-    const known = item.blockedBy
-      .map((title) => titles.get(title.toLowerCase()))
-      .filter((title): title is string => !!title && title !== item.title);
-    item.blockedBy = [...new Set(known)];
+  if (!res.ok) {
+    const errorText = await res.text().catch(() => "Unknown error");
+    // 401 and 403 mean the key is wrong or lacks access: another model will
+    // not help. Everything else (retired model, overload, bad gateway) might.
+    const ours = res.status === 401 || res.status === 403;
+    throw new ModelAttemptError(
+      `HTTP ${res.status}: ${errorText.slice(0, 300)}`,
+      !ours,
+      ours
+        ? "The AI service rejected the server's API key. Ask the site owner to check NVIDIA_API_KEY."
+        : `AI service returned an error (${res.status}). Please try again.`,
+    );
   }
 
-  return {
-    summary,
-    keyDecisions: list(data.keyDecisions),
-    sentimentInfo: {
-      score: text(sentiment.score, 40) || "Neutral",
-      breakdown: text(sentiment.breakdown, 1000),
-    },
-    actionItems,
-    risks: list(data.risks),
-    dependencies: list(data.dependencies),
-    blockers: list(data.blockers),
-    openQuestions: list(data.openQuestions),
-  };
+  const body: any = await res.json().catch(() => null);
+  const text: unknown = body?.choices?.[0]?.message?.content;
+  if (typeof text !== "string" || text.trim() === "") {
+    throw new ModelAttemptError(
+      "empty reply",
+      true,
+      "The AI returned an empty response. Please try again.",
+    );
+  }
+
+  try {
+    return normalizeAnalysis(extractJson(text));
+  } catch (err) {
+    throw new ModelAttemptError(
+      `unusable reply (${err instanceof Error ? err.message : String(err)}): ${text.slice(0, 300)}`,
+      true,
+      "The AI returned malformed data. Please try again.",
+    );
+  }
+}
+
+/**
+ * Send a transcript to an NVIDIA-hosted model and return the structured
+ * meeting analysis. Models are tried in order until one gives a usable reply.
+ */
+export async function analyzeTranscript(
+  transcript: string,
+): Promise<TranscriptAnalysis> {
+  const apiKey = getApiKey();
+  const models = getModels();
+
+  let last: ModelAttemptError | undefined;
+  for (const model of models) {
+    try {
+      const analysis = await analyzeWith(model, apiKey, transcript);
+      if (last) console.warn(`AI analysis succeeded with fallback model ${model}`);
+      return analysis;
+    } catch (err) {
+      if (!(err instanceof ModelAttemptError)) throw err;
+      console.error(`AI model ${model} failed: ${err.message}`);
+      last = err;
+      if (!err.tryNext) break;
+    }
+  }
+
+  throw new ApiError(502, last?.userMessage ?? "AI analysis failed. Please try again.");
 }

@@ -37,7 +37,7 @@ services:
       # and cross-site auth cookies work. e.g. https://kanban-ai-frontend.onrender.com
       - key: APP_URL
         sync: false
-      # AI analysis (NVIDIA MiniMax M3). Optional; analyze returns a clear error
+      # AI analysis (NVIDIA-hosted models). Optional; analyze returns a clear error
       # if unset.
       - key: NVIDIA_API_KEY
         sync: false
