@@ -11,7 +11,7 @@ deployed as its own static site.
 | Runtime  | Node.js 20+, Express, Socket.IO                   |
 | Database | PostgreSQL via Prisma ORM                         |
 | Auth     | bcrypt + JWT (HS256) in an httpOnly cookie        |
-| AI       | NVIDIA-hosted models (`/v1/chat/completions`)     |
+| AI       | DeepSeek V4.1 Flash on Nebius, NVIDIA as fallback |
 | Payments | Stripe subscriptions (Checkout + Billing Portal)  |
 
 ## Architecture
@@ -40,7 +40,7 @@ server then broadcasts updated board state to everyone in that board's room.
 
 ```bash
 npm install
-cp .env.example .env       # set JWT_SECRET; optionally NVIDIA_API_KEY
+cp .env.example .env       # set JWT_SECRET; optionally NEBIUS_API_KEY
 
 docker compose up -d       # local Postgres (matches the default DATABASE_URL)
 npm run db:deploy          # apply migrations
@@ -58,8 +58,9 @@ first-party locally.
 | `DATABASE_URL`          | yes      | PostgreSQL connection string.                              |
 | `JWT_SECRET`            | yes      | ≥ 32 random chars. Signs session JWTs.                     |
 | `APP_URL`               | prod     | Frontend origin. Locks down CORS + builds share links.     |
-| `NVIDIA_API_KEY`        | no       | Enables AI analysis. Without it, analyze returns an error. |
-| `NVIDIA_MODELS`         | no       | Comma-separated model ids to try, in order. Defaults to the list in `server/services/ai.ts`. |
+| `NEBIUS_API_KEY`        | no       | Enables AI analysis on Nebius (tried first). |
+| `NVIDIA_API_KEY`        | no       | Enables AI analysis on NVIDIA (fallback). Without either key, analyze returns an error. |
+| `NEBIUS_MODELS`, `NVIDIA_MODELS` | no | Comma-separated model ids to try on each host, in order. Defaults are in `server/services/ai.ts`. |
 | `COOKIE_DOMAIN`         | no       | Shared parent domain for first-party cross-subdomain auth. |
 | `NODE_ENV` / `PORT`     | no       | Default `development` / `3000` (Render injects `PORT`).    |
 | `STRIPE_*`              | no       | Enables paid plans; free tier works without them.          |
