@@ -27,7 +27,8 @@ import { analyzeTranscript } from "../services/ai";
 import { notifyMentions, notifyAssignment } from "../services/notifications";
 import { broadcastBoardState } from "../realtime";
 import { analyzeLimiter } from "../middleware/rateLimit";
-import { PLANS, transcriptionLimit, usedCount } from "../services/plans";
+import { PLANS, transcriptionLimit } from "../services/plans";
+import { reserveTranscription, releaseTranscription } from "../services/usage";
 
 export const boardsRouter = Router();
 
@@ -129,8 +130,9 @@ boardsRouter.put(
     const access = await requireBoardAccess(req.user!.id, req.params.id);
     const { displayName } = parse(displayNameSchema, req.body);
 
-    if (access.role === "OWNER") {
-      // Owners are identified by their account name; nothing to store.
+    if (access.via !== "member") {
+      // Owners, and people who reach the board through its project, go by their
+      // account name. There is no board membership row to store another name on.
       res.json({ displayName: req.user!.name });
       return;
     }
@@ -169,64 +171,65 @@ boardsRouter.post(
   "/:id/analyze",
   analyzeLimiter,
   asyncHandler(async (req, res) => {
-    const { role } = await requireBoardAccess(req.user!.id, req.params.id, "EDITOR");
+    const userId = req.user!.id;
+    const { role } = await requireBoardAccess(userId, req.params.id, "EDITOR");
     const { transcript } = parse(analyzeSchema, req.body);
 
-    // --- Quota enforcement (a transcription = one AI analysis) ---
-    const usage = await prisma.user.findUniqueOrThrow({
-      where: { id: req.user!.id },
-      select: { plan: true, freeTranscriptionsUsed: true, periodTranscriptionsUsed: true },
+    // --- Quota (a transcription = one AI analysis) ---
+    // The transcription is taken before the AI is called and handed back if the
+    // analysis fails, so parallel requests cannot spend more than the allowance.
+    const { plan } = await prisma.user.findUniqueOrThrow({
+      where: { id: userId },
+      select: { plan: true },
     });
-    const limit = transcriptionLimit(usage.plan);
-    if (usedCount(usage) >= limit) {
-      const planName = PLANS[usage.plan].name;
+    if (!(await reserveTranscription(userId, plan))) {
+      const limit = transcriptionLimit(plan);
       throw new ApiError(
         402,
-        usage.plan === "FREE"
+        plan === "FREE"
           ? `You've used all ${limit} free transcriptions. Upgrade to a paid plan to keep going.`
-          : `You've reached your ${planName} plan limit of ${limit} transcriptions this month. Upgrade for more.`,
+          : `You've reached your ${PLANS[plan].name} plan limit of ${limit} transcriptions this month. Upgrade for more.`,
       );
     }
 
-    const analysis = await analyzeTranscript(transcript);
+    try {
+      const analysis = await analyzeTranscript(transcript);
 
-    // Re-analyzing regenerates the board: replace action items, keep comments.
-    // The same transaction records one transcription against the user's quota.
-    await prisma.$transaction([
-      prisma.actionItem.deleteMany({ where: { boardId: req.params.id } }),
-      prisma.board.update({
-        where: { id: req.params.id },
-        data: {
-          transcript,
-          summary: analysis.summary,
-          keyDecisions: analysis.keyDecisions,
-          risks: analysis.risks,
-          dependencies: analysis.dependencies,
-          blockers: analysis.blockers,
-          openQuestions: analysis.openQuestions,
-          sentimentScore: analysis.sentimentInfo.score,
-          sentimentBreakdown: analysis.sentimentInfo.breakdown,
-          actionItems: {
-            create: analysis.actionItems.map((item, index) => ({
-              title: item.title,
-              assignee: item.assignee || "Unassigned",
-              description: item.description,
-              priority: item.priority,
-              blockedBy: item.blockedBy ?? [],
-              status: "pending",
-              position: index,
-            })),
+      // Re-analyzing regenerates the board: replace action items, keep the
+      // board discussion.
+      await prisma.$transaction([
+        prisma.actionItem.deleteMany({ where: { boardId: req.params.id } }),
+        prisma.board.update({
+          where: { id: req.params.id },
+          data: {
+            transcript,
+            summary: analysis.summary,
+            keyDecisions: analysis.keyDecisions,
+            risks: analysis.risks,
+            dependencies: analysis.dependencies,
+            blockers: analysis.blockers,
+            openQuestions: analysis.openQuestions,
+            sentimentScore: analysis.sentimentInfo.score,
+            sentimentBreakdown: analysis.sentimentInfo.breakdown,
+            actionItems: {
+              create: analysis.actionItems.map((item, index) => ({
+                title: item.title,
+                assignee: item.assignee,
+                description: item.description || null,
+                priority: item.priority,
+                blockedBy: item.blockedBy,
+                status: "pending",
+                position: index,
+              })),
+            },
           },
-        },
-      }),
-      prisma.user.update({
-        where: { id: req.user!.id },
-        data:
-          usage.plan === "FREE"
-            ? { freeTranscriptionsUsed: { increment: 1 } }
-            : { periodTranscriptionsUsed: { increment: 1 } },
-      }),
-    ]);
+        }),
+      ]);
+    } catch (err) {
+      // Nothing was produced, so the transcription goes back to the user.
+      await releaseTranscription(userId, plan).catch(() => {});
+      throw err;
+    }
 
     const board = await reload(req.params.id);
     await broadcastBoardState(board.id);
@@ -325,7 +328,7 @@ boardsRouter.delete(
 boardsRouter.post(
   "/:id/items",
   asyncHandler(async (req, res) => {
-    await requireBoardAccess(req.user!.id, req.params.id, "EDITOR");
+    const { role } = await requireBoardAccess(req.user!.id, req.params.id, "EDITOR");
     const data = parse(createActionItemSchema, req.body);
     const max = await prisma.actionItem.aggregate({
       where: { boardId: req.params.id },
@@ -352,14 +355,14 @@ boardsRouter.post(
     }).catch(() => {});
     const board = await reload(req.params.id);
     await broadcastBoardState(board.id);
-    res.status(201).json({ board: serializeBoard(board, "EDITOR") });
+    res.status(201).json({ board: serializeBoard(board, role) });
   }),
 );
 
 boardsRouter.patch(
   "/:id/items/:itemId",
   asyncHandler(async (req, res) => {
-    await requireBoardAccess(req.user!.id, req.params.id, "EDITOR");
+    const { role } = await requireBoardAccess(req.user!.id, req.params.id, "EDITOR");
     const data = parse(updateActionItemSchema, req.body);
 
     // Ensure the item belongs to this board before updating.
@@ -383,7 +386,7 @@ boardsRouter.patch(
     }
     const board = await reload(req.params.id);
     await broadcastBoardState(board.id);
-    res.json({ board: serializeBoard(board, "EDITOR") });
+    res.json({ board: serializeBoard(board, role) });
   }),
 );
 
@@ -418,7 +421,7 @@ boardsRouter.post(
     );
     const board = await reload(req.params.id);
     await broadcastBoardState(board.id);
-    res.status(201).json({ board: serializeBoard(board, "EDITOR") });
+    res.status(201).json({ board: serializeBoard(board, access.role) });
   }),
 );
 

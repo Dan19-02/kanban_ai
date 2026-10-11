@@ -15,6 +15,11 @@ function roomName(boardId: string): string {
   return `board:${boardId}`;
 }
 
+/** A private room per user, so all of one person's sockets can be closed at once. */
+function userRoom(userId: string): string {
+  return `user:${userId}`;
+}
+
 /** Minimal cookie-header parser (avoids depending on cookie-parser internals). */
 function readCookie(header: string | undefined, name: string): string | undefined {
   if (!header) return undefined;
@@ -61,20 +66,37 @@ export function initRealtime(
     const token =
       (typeof authToken === "string" && authToken) ||
       readCookie(socket.handshake.headers.cookie, AUTH_COOKIE);
-    const user = await authenticateToken(token);
-    if (!user) return next(new Error("unauthorized"));
-    socket.data.user = user;
-    next();
+    try {
+      const user = await authenticateToken(token);
+      if (!user) return next(new Error("unauthorized"));
+      socket.data.user = user;
+      next();
+    } catch (err) {
+      // The lookup failed (for example the database is unreachable). Refuse the
+      // connection; the client retries on its own.
+      // eslint-disable-next-line no-console
+      console.error("Socket authentication failed:", err);
+      next(new Error("unavailable"));
+    }
   });
 
   io.on("connection", (socket: Socket) => {
     const user = socket.data.user as AuthUser;
     let joinedBoardId: string | null = null;
+    socket.join(userRoom(user.id));
 
     socket.on("join-board", async (boardId: string) => {
       if (typeof boardId !== "string" || !boardId) return;
 
-      const access = await getBoardAccess(user.id, boardId);
+      let access;
+      try {
+        access = await getBoardAccess(user.id, boardId);
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.error("Could not load a board for a socket:", err);
+        socket.emit("board-error", { message: "This board could not be loaded. Try again shortly." });
+        return;
+      }
       if (!access) {
         socket.emit("board-error", { message: "You do not have access to this board." });
         return;
@@ -102,6 +124,14 @@ export function initRealtime(
   });
 
   return io;
+}
+
+/**
+ * Close every live connection a user has. Called on sign-out: their tokens are
+ * retired, so a connection opened with one must not keep receiving boards.
+ */
+export function disconnectUser(userId: string): void {
+  io?.in(userRoom(userId)).disconnectSockets(true);
 }
 
 /**

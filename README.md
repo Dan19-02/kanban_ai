@@ -1,4 +1,4 @@
-# Meeting to Kanban AI — Backend
+# Meeting to Kanban AI: Backend
 
 The API, real-time, persistence, AI analysis, and billing for **Meeting to Kanban
 AI**. Pairs with the separate frontend repo (`meeting-to-kanban-ai`), which is
@@ -71,20 +71,36 @@ generates `JWT_SECRET`, runs migrations on each deploy, and starts the API.
 1. Render Dashboard → **New → Blueprint** → select this repo.
 2. Set **`APP_URL`** to the frontend Static Site URL, and `NVIDIA_API_KEY` /
    `STRIPE_*` as needed.
-3. Deploy. Health check: `GET /api/health`.
+3. Deploy. `GET /api/health` says the process is up and which commit it runs.
+   `GET /api/health/db` says whether it can reach the database.
 
 > Using an existing database (Aiven/Neon/Supabase)? Delete the `databases:` block
 > in `render.yaml` and set `DATABASE_URL` directly. Fresh databases get all
 > migrations via `prisma migrate deploy`; a database that already has a different
 > migration history must be reset or baselined first.
 
+> **The free Render Postgres expires 30 days after it is created.** Once it is
+> gone, sign-in answers 503 and every deploy fails at the migration step, because
+> the build runs `prisma migrate deploy`. For a demo that has to stay up, set
+> `DATABASE_URL` to a free database that does not expire (Neon, for example).
+
 ## Security notes
 
 - Passwords: bcrypt (cost 12); login is constant-time to prevent user enumeration.
-- Sessions: stateless JWTs (HS256, algorithm-pinned) in `httpOnly` cookies —
-  `SameSite=None; Secure` in production (cross-site), `Lax` in development.
+- Sessions: JWTs (HS256, algorithm-pinned) in `httpOnly` cookies, `SameSite=None;
+  Secure` in production (cross-site) and `Lax` in development. Each token carries
+  the user's token version; signing out raises it, which ends every session for
+  that account, so a copied token stops working.
 - CORS: strict, credentialed allow-list (`APP_URL` + dev origins only).
 - Authorization: every board action is role-checked (owner / editor / viewer);
   the Socket.IO handshake is authenticated from the same cookie.
 - Helmet security headers (CSP, HSTS, …); rate limiting on auth and AI endpoints.
 - All request bodies validated with zod; Stripe webhooks signature-verified.
+- AI replies are never trusted as written: the JSON is extracted from any
+  reasoning or code fence around it, then every field is checked and normalised
+  before it is stored.
+- A transcription is taken from the allowance in one conditional update before
+  the AI is called, and handed back if the analysis fails, so parallel requests
+  cannot overspend a plan.
+- A database outage answers 503 with a clear message instead of stopping the
+  server, and reads recover on their own when the database returns.

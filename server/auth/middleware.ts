@@ -32,9 +32,11 @@ export async function authenticateToken(
 
   const user = await prisma.user.findUnique({
     where: { id: payload.sub },
-    select: { id: true, email: true, name: true },
+    select: { id: true, email: true, name: true, tokenVersion: true },
   });
-  return user;
+  // A token signed before the user's last sign-out is no longer valid.
+  if (!user || user.tokenVersion !== payload.tv) return null;
+  return { id: user.id, email: user.email, name: user.name };
 }
 
 /**
@@ -50,15 +52,23 @@ export function getRequestToken(req: Request): string | undefined {
   return req.cookies?.[AUTH_COOKIE];
 }
 
-/** Populates req.user when a valid token is present; never rejects. */
+// Both middlewares below hand a failed lookup (for example an unreachable
+// database) to the error handler. Express 4 does not catch a rejected promise
+// from a middleware, and an unhandled one would stop the whole process.
+
+/** Populates req.user when a valid token is present; never answers 401. */
 export async function optionalAuth(
   req: Request,
   _res: Response,
   next: NextFunction,
 ): Promise<void> {
-  const user = await authenticateToken(getRequestToken(req));
-  if (user) req.user = user;
-  next();
+  try {
+    const user = await authenticateToken(getRequestToken(req));
+    if (user) req.user = user;
+    next();
+  } catch (err) {
+    next(err);
+  }
 }
 
 /** Rejects with 401 unless a valid token (Bearer header or cookie) is present. */
@@ -67,11 +77,15 @@ export async function requireAuth(
   res: Response,
   next: NextFunction,
 ): Promise<void> {
-  const user = await authenticateToken(getRequestToken(req));
-  if (!user) {
-    res.status(401).json({ error: "Authentication required" });
-    return;
+  try {
+    const user = await authenticateToken(getRequestToken(req));
+    if (!user) {
+      res.status(401).json({ error: "Authentication required" });
+      return;
+    }
+    req.user = user;
+    next();
+  } catch (err) {
+    next(err);
   }
-  req.user = user;
-  next();
 }

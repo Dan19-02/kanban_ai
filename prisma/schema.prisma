@@ -35,6 +35,9 @@ model User {
   email        String   @unique
   name         String
   passwordHash String
+  // Raised when the user signs out. Auth tokens carry the version they were
+  // signed with, so every token issued before the last sign-out stops working.
+  tokenVersion Int      @default(0)
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 

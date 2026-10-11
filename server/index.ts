@@ -7,8 +7,10 @@ import helmet from "helmet";
 import cookieParser from "cookie-parser";
 import cors from "cors";
 import compression from "compression";
+import { Prisma } from "@prisma/client";
 
 import { env, isProduction } from "./env";
+import { prisma } from "./prisma";
 import { ApiError } from "./lib/http";
 import { corsOptions, csrfOriginGuard, socketCorsOrigin } from "./lib/cors";
 import { apiLimiter } from "./middleware/rateLimit";
@@ -19,6 +21,17 @@ import { notificationsRouter } from "./routes/notifications";
 import { billingRouter } from "./routes/billing";
 import { constructWebhookEvent, handleWebhookEvent } from "./services/billing";
 import { initRealtime } from "./realtime";
+
+// Prisma error codes that mean the database could not be reached or timed out.
+const DATABASE_DOWN_CODES = new Set(["P1001", "P1002", "P1008", "P1017", "P2024"]);
+
+function isDatabaseDown(err: unknown): boolean {
+  return (
+    err instanceof Prisma.PrismaClientInitializationError ||
+    err instanceof Prisma.PrismaClientRustPanicError ||
+    (err instanceof Prisma.PrismaClientKnownRequestError && DATABASE_DOWN_CODES.has(err.code))
+  );
+}
 
 async function startServer() {
   const app = express();
@@ -101,9 +114,28 @@ async function startServer() {
   app.use(express.json({ limit: "1mb" }));
 
   // --- API ---
-  app.get("/api/health", (_req, res) => res.json({ ok: true }));
+  // Liveness only: it says the process is up and which commit it runs. The host
+  // polls it, so it never touches the database.
+  app.get("/api/health", (_req, res) =>
+    res.json({ ok: true, commit: process.env.RENDER_GIT_COMMIT?.slice(0, 7) }),
+  );
 
   app.use("/api", apiLimiter);
+
+  // Readiness: can the server reach its database right now? Not polled; open it
+  // by hand when sign-in fails to tell an outage from a bug. It sits behind the
+  // rate limiter because each call runs a query.
+  app.get("/api/health/db", async (_req, res) => {
+    try {
+      await prisma.$queryRaw`SELECT 1`;
+      res.json({ ok: true });
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error("Database check failed:", err);
+      res.status(503).json({ ok: false, error: "The database is not reachable." });
+    }
+  });
+
   app.use("/api/auth", authRouter);
   app.use("/api/projects", projectsRouter);
   app.use("/api/boards", boardsRouter);
@@ -137,8 +169,24 @@ async function startServer() {
       res.status(err.status).json({ error: err.message });
       return;
     }
+    // A request body the JSON parser refused (malformed or too large) is the
+    // caller's mistake, not a server fault.
+    const status = (err as { status?: unknown } | null)?.status;
+    const fromBodyParser = typeof (err as { type?: unknown } | null)?.type === "string";
+    if (fromBodyParser && typeof status === "number" && status >= 400 && status < 500) {
+      res.status(status).json({
+        error: status === 413 ? "That request is too large." : "The request could not be read.",
+      });
+      return;
+    }
     // eslint-disable-next-line no-console
     console.error("Unhandled error:", err);
+    if (isDatabaseDown(err)) {
+      res
+        .status(503)
+        .json({ error: "The service cannot reach its database right now. Please try again shortly." });
+      return;
+    }
     res.status(500).json({ error: "Something went wrong. Please try again." });
   });
 
@@ -147,6 +195,14 @@ async function startServer() {
     console.log(`Server running on http://localhost:${env.PORT}`);
   });
 }
+
+// A promise rejected outside a request handler (a socket event, a background
+// task) is logged and the server keeps running. Left to the default, it would
+// stop the process and drop every connected user.
+process.on("unhandledRejection", (reason) => {
+  // eslint-disable-next-line no-console
+  console.error("Unhandled promise rejection:", reason);
+});
 
 startServer().catch((err) => {
   // eslint-disable-next-line no-console

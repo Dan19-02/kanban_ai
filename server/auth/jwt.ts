@@ -10,6 +10,11 @@ export interface AuthTokenPayload {
   /** User id */
   sub: string;
   email: string;
+  /**
+   * The user's token version when this token was signed. Signing out raises the
+   * version on the user, which retires every token signed before it.
+   */
+  tv: number;
 }
 
 export function signAuthToken(payload: AuthTokenPayload): string {
@@ -28,7 +33,13 @@ export function verifyAuthToken(token: string): AuthTokenPayload | null {
       typeof (decoded as any).sub === "string" &&
       typeof (decoded as any).email === "string"
     ) {
-      return { sub: (decoded as any).sub, email: (decoded as any).email };
+      const tv = (decoded as any).tv;
+      return {
+        sub: (decoded as any).sub,
+        email: (decoded as any).email,
+        // Tokens signed before versions existed carry none; they count as 0.
+        tv: typeof tv === "number" ? tv : 0,
+      };
     }
     return null;
   } catch {
